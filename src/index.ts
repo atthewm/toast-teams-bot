@@ -38,6 +38,7 @@ app.message(/^health(check)?$/i, async ({ send }) => {
   await send("Running health check...");
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_healthcheck");
+    if (!data) { await send(await mcp.callToolText("toast_healthcheck")); return; }
     const checks = data.checks as Record<string, { status: string; message: string; durationMs?: number }>;
     const config = data.config as Record<string, unknown>;
 
@@ -70,17 +71,14 @@ app.message(/^(menu search|search menu)\s+(.+)/i, async ({ send, activity }) => 
 
   await send(`Searching for "${query}"...`);
   try {
-    const data = await mcp.callToolJson<{
-      query: string;
-      resultCount: number;
-      results: Array<{
-        item: { name: string; price?: number; guid: string };
-        menuName: string;
-        groupName: string;
-      }>;
-    }>("toast_search_menu_items", { query });
+    // Use callToolText since the MCP tool may return plain text for no results
+    const rawText = await mcp.callToolText("toast_search_menu_items", { query });
 
-    if (!data.results || data.results.length === 0) {
+    // Try to parse as JSON (structured results)
+    let data: { results?: Array<{ item: { name: string; price?: number }; menuName: string; groupName: string }> } | null = null;
+    try { data = JSON.parse(rawText); } catch { /* plain text response */ }
+
+    if (!data || !data.results || data.results.length === 0) {
       await send(`No items found matching "${query}".`);
       return;
     }
@@ -107,6 +105,11 @@ app.message(/^menus?$/i, async ({ send }) => {
       menus: Array<{ guid: string; name: string; groupCount: number }>;
     }>("toast_get_menu_metadata");
 
+    if (!data || !data.menus) {
+      await send(await mcp.callToolText("toast_get_menu_metadata"));
+      return;
+    }
+
     let text = `**Menus (${data.menuCount})**\n\n`;
     for (const m of data.menus) {
       text += `**${m.name}**: ${m.groupCount} group${m.groupCount === 1 ? "" : "s"}\n`;
@@ -122,24 +125,25 @@ app.message(/^orders?(\s+today)?$/i, async ({ send }) => {
   await send("Fetching today's orders...");
   try {
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-    const data = await mcp.callToolJson<{
-      count: number;
-      orders: Array<{
-        guid: string;
-        server?: { name?: string };
-        checks?: Array<{ totalAmount?: number }>;
-      }>;
-    }>("toast_list_orders", { businessDate: today });
+    // The MCP tool returns { count, orders } but fallback to raw text
+    const rawText = await mcp.callToolText("toast_list_orders", { businessDate: today });
 
-    if (data.orders.length === 0) {
+    let data: { count?: number; orders?: Array<{ guid?: string; server?: { name?: string }; checks?: Array<{ totalAmount?: number }> }> } | null = null;
+    try { data = JSON.parse(rawText); } catch { /* plain text */ }
+
+    if (!data || !data.orders || data.orders.length === 0) {
       await send("No orders found for today.");
       return;
     }
 
-    let text = `**Orders for ${today}** (${data.orders.length})\n\n`;
+    let text = `**Orders for ${today}** (${data.count ?? data.orders.length})\n\n`;
     for (const o of data.orders.slice(0, 20)) {
+      const guid = o.guid ?? "unknown";
       const total = o.checks?.reduce((s, c) => s + (c.totalAmount ?? 0), 0)?.toFixed(2);
-      text += `${o.guid.slice(0, 8)}... ${o.server?.name ?? ""} ${total ? `$${total}` : ""}\n`;
+      text += `${guid.slice(0, 8)}... ${o.server?.name ?? ""} ${total ? `$${total}` : ""}\n`;
+    }
+    if (data.orders.length > 20) {
+      text += `\n... and ${data.orders.length - 20} more`;
     }
     await send(text);
   } catch (err) {
@@ -151,6 +155,7 @@ app.message(/^orders?(\s+today)?$/i, async ({ send }) => {
 app.message(/^config(uration)?$/i, async ({ send }) => {
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_get_config_summary");
+    if (!data) { await send(await mcp.callToolText("toast_get_config_summary")); return; }
     const restaurant = data.restaurant as Record<string, unknown> | null;
     const revenueCenters = data.revenueCenters as Array<{ name: string }>;
     const diningOptions = data.diningOptions as Array<{ name: string }>;
@@ -179,6 +184,7 @@ app.message(/^config(uration)?$/i, async ({ send }) => {
 app.message(/^(status|auth)$/i, async ({ send }) => {
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_auth_status");
+    if (!data) { await send(await mcp.callToolText("toast_auth_status")); return; }
     await send(
       `**Authentication Status**\n\n` +
       `Authenticated: **${data.authenticated}**\n` +
@@ -202,14 +208,56 @@ app.message(/^capabilities$/i, async ({ send }) => {
   }
 });
 
-// Fallback
+// Fallback: show what we actually received for debugging
 app.on("message", async ({ send, activity }) => {
-  const text = (activity.text ?? "").trim();
+  const raw = activity.text ?? "";
+  // Strip any bot @mention tags that Teams may include
+  const text = raw.replace(/<at[^>]*>.*?<\/at>/gi, "").trim();
+
   if (text.length < 2) {
     await send("Type **help** to see available commands.");
     return;
   }
-  await send(`I did not recognize "${text}". Type **help** for available commands.`);
+
+  // Try to match commands manually since Teams may alter the text
+  const lower = text.toLowerCase();
+
+  if (lower === "help" || lower === "?") {
+    await send("Use one of: **health**, **menus**, **menu search [term]**, **orders**, **config**, **status**, **capabilities**");
+    return;
+  }
+
+  if (lower.startsWith("menu search ") || lower.startsWith("search menu ") || lower.startsWith("search ")) {
+    const query = lower.replace(/^(menu search|search menu|search)\s+/, "").trim();
+    if (query) {
+      await send(`Searching for "${query}"...`);
+      try {
+        const rawText = await mcp.callToolText("toast_search_menu_items", { query });
+        let data: { results?: Array<{ item: { name: string; price?: number }; menuName: string; groupName: string }> } | null = null;
+        try { data = JSON.parse(rawText); } catch { /* plain text */ }
+        if (!data || !data.results || data.results.length === 0) {
+          await send(`No items found matching "${query}".`);
+          return;
+        }
+        let msg = `**Menu Search: "${query}"** (${data.results.length} results)\n\n`;
+        for (const r of data.results.slice(0, 15)) {
+          const price = r.item.price != null ? `$${r.item.price.toFixed(2)}` : "N/A";
+          msg += `**${r.item.name}** ${price} (${r.menuName} > ${r.groupName})\n`;
+        }
+        await send(msg);
+      } catch (err) {
+        await send(`Search failed: ${(err as Error).message}`);
+      }
+      return;
+    }
+  }
+
+  if (lower === "menus" || lower === "menu") {
+    await send("Fetching menus... (try the **menus** command)");
+    return;
+  }
+
+  await send(`Did not match command: "${text}" (raw: "${raw.slice(0, 100)}"). Type **help** for commands.`);
 });
 
 app.start(config.port).catch((err) => {

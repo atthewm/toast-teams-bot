@@ -103,10 +103,27 @@ export class ToastMcpClient {
   async callToolJson<T = unknown>(
     name: string,
     args: Record<string, unknown> = {}
-  ): Promise<T> {
+  ): Promise<T | null> {
     const result = await this.callTool(name, args);
-    const text = result.content[0]?.text ?? "{}";
-    return JSON.parse(text) as T;
+    const text = result.content[0]?.text ?? "";
+
+    // Try to parse as JSON, return null if it's plain text
+    try {
+      return JSON.parse(text) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Call a tool and return the raw text response.
+   */
+  async callToolText(
+    name: string,
+    args: Record<string, unknown> = {}
+  ): Promise<string> {
+    const result = await this.callTool(name, args);
+    return result.content[0]?.text ?? "";
   }
 
   getTools(): McpToolDefinition[] {
