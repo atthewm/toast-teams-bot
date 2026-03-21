@@ -1,8 +1,8 @@
 {
-  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.25/MicrosoftTeams.schema.json",
-  "manifestVersion": "1.25",
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
   "version": "0.1.0",
-  "id": "${{BOT_ID}}",
+  "id": "7445aca1-bad3-4eca-8276-6ad46662495f",
   "developer": {
     "name": "Toast MCP",
     "websiteUrl": "https://github.com/atthewm/toast-teams-bot",
@@ -24,7 +24,7 @@
   "accentColor": "#FF6600",
   "bots": [
     {
-      "botId": "${{BOT_ID}}",
+      "botId": "7445aca1-bad3-4eca-8276-6ad46662495f",
       "scopes": ["personal", "team", "groupChat"],
       "commandLists": [
         {
