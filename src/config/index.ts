@@ -21,12 +21,9 @@ export interface BotConfig {
   botId: string;
   botPassword: string;
   botTenantId: string;
-  botType: string;
   mcpServerUrl: string;
   mcpApiKey: string | undefined;
   port: number;
-  alertChannelId: string | undefined;
-  alertTeamId: string | undefined;
   logLevel: string;
 }
 
@@ -35,15 +32,16 @@ export function loadConfig(): BotConfig {
 
   const env = process.env;
 
-  const botId = env.BOT_ID;
-  const botPassword = env.BOT_PASSWORD;
-  const botTenantId = env.BOT_TENANT_ID;
+  // Support both naming conventions
+  const botId = env.ENTRA_APP_CLIENT_ID ?? env.BOT_ID;
+  const botPassword = env.ENTRA_APP_CLIENT_SECRET ?? env.BOT_PASSWORD;
+  const botTenantId = env.ENTRA_TENANT_ID ?? env.BOT_TENANT_ID;
   const mcpServerUrl = env.MCP_SERVER_URL;
 
   const missing: string[] = [];
-  if (!botId) missing.push("BOT_ID");
-  if (!botPassword) missing.push("BOT_PASSWORD");
-  if (!botTenantId) missing.push("BOT_TENANT_ID");
+  if (!botId) missing.push("ENTRA_APP_CLIENT_ID (or BOT_ID)");
+  if (!botPassword) missing.push("ENTRA_APP_CLIENT_SECRET (or BOT_PASSWORD)");
+  if (!botTenantId) missing.push("ENTRA_TENANT_ID (or BOT_TENANT_ID)");
   if (!mcpServerUrl) missing.push("MCP_SERVER_URL");
 
   if (missing.length > 0) {
@@ -57,12 +55,9 @@ export function loadConfig(): BotConfig {
     botId: botId!,
     botPassword: botPassword!,
     botTenantId: botTenantId!,
-    botType: env.BOT_TYPE ?? "SingleTenant",
     mcpServerUrl: mcpServerUrl!,
     mcpApiKey: env.MCP_API_KEY,
     port: parseInt(env.PORT ?? "3978", 10),
-    alertChannelId: env.ALERT_CHANNEL_ID,
-    alertTeamId: env.ALERT_TEAM_ID,
     logLevel: env.LOG_LEVEL ?? "info",
   };
 }

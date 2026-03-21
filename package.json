@@ -30,10 +30,13 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
-    "botbuilder": "^4.23.3",
-    "botframework-connector": "^4.23.3",
-    "express": "^5.2.1",
-    "@modelcontextprotocol/sdk": "^1.12.1"
+    "@microsoft/teams.ai": "^2.0.5",
+    "@microsoft/teams.api": "^2.0.5",
+    "@microsoft/teams.apps": "^2.0.5",
+    "@microsoft/teams.cards": "^2.0.5",
+    "@microsoft/teams.common": "^2.0.5",
+    "@microsoft/teams.mcpclient": "^2.0.5",
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

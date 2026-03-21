@@ -1,6 +1,9 @@
 /**
  * MCP client that connects to the Toast MCP Server's Streamable HTTP endpoint.
  * Handles session management, tool discovery, and tool invocation.
+ *
+ * This is used for the direct command mode (no LLM required).
+ * For AI powered natural language, use McpClientPlugin from @microsoft/teams.mcpclient instead.
  */
 
 interface McpToolDefinition {
@@ -24,11 +27,7 @@ export class ToastMcpClient {
     private readonly apiKey: string | undefined
   ) {}
 
-  /**
-   * Initialize the MCP session and discover available tools.
-   */
   async connect(): Promise<void> {
-    // Send initialize request
     const initResponse = await this.sendRequest({
       jsonrpc: "2.0",
       id: 1,
@@ -40,21 +39,15 @@ export class ToastMcpClient {
       },
     });
 
-    // Extract session ID from the response
     if (initResponse.sessionId) {
       this.sessionId = initResponse.sessionId;
     }
 
-    // Send initialized notification
     await this.sendRequest(
-      {
-        jsonrpc: "2.0",
-        method: "notifications/initialized",
-      },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
       true
     );
 
-    // Discover tools
     const toolsResponse = await this.sendRequest({
       jsonrpc: "2.0",
       id: 2,
@@ -73,9 +66,6 @@ export class ToastMcpClient {
     );
   }
 
-  /**
-   * Call a tool on the Toast MCP server.
-   */
   async callTool(
     name: string,
     args: Record<string, unknown> = {}
@@ -98,10 +88,7 @@ export class ToastMcpClient {
     if (response.data?.error) {
       return {
         content: [
-          {
-            type: "text",
-            text: `MCP error: ${JSON.stringify(response.data.error)}`,
-          },
+          { type: "text", text: `MCP error: ${JSON.stringify(response.data.error)}` },
         ],
         isError: true,
       };
@@ -113,9 +100,6 @@ export class ToastMcpClient {
     };
   }
 
-  /**
-   * Convenience: call a tool and parse the JSON text result.
-   */
   async callToolJson<T = unknown>(
     name: string,
     args: Record<string, unknown> = {}
@@ -125,23 +109,14 @@ export class ToastMcpClient {
     return JSON.parse(text) as T;
   }
 
-  /**
-   * Get the list of available tools.
-   */
   getTools(): McpToolDefinition[] {
     return [...this.tools];
   }
 
-  /**
-   * Check if connected.
-   */
   isConnected(): boolean {
     return this.initialized;
   }
 
-  /**
-   * Send a JSON-RPC request to the MCP server and parse the SSE response.
-   */
   private async sendRequest(
     payload: Record<string, unknown>,
     isNotification = false
@@ -165,7 +140,6 @@ export class ToastMcpClient {
       body: JSON.stringify(payload),
     });
 
-    // Extract session ID from response headers
     const newSessionId = response.headers.get("mcp-session-id");
     if (newSessionId) {
       this.sessionId = newSessionId;
@@ -175,8 +149,9 @@ export class ToastMcpClient {
       return { sessionId: this.sessionId, data: null };
     }
 
-    // Parse SSE response
     const body = await response.text();
+
+    // Parse SSE response
     const dataLines = body
       .split("\n")
       .filter((line) => line.startsWith("data: "))
@@ -184,23 +159,13 @@ export class ToastMcpClient {
 
     if (dataLines.length > 0) {
       try {
-        const parsed = JSON.parse(dataLines[dataLines.length - 1]);
-        return { sessionId: this.sessionId, data: parsed };
-      } catch {
-        // Try parsing as plain JSON (non-SSE response)
-        try {
-          const parsed = JSON.parse(body);
-          return { sessionId: this.sessionId, data: parsed };
-        } catch {
-          return { sessionId: this.sessionId, data: null };
-        }
-      }
+        return { sessionId: this.sessionId, data: JSON.parse(dataLines[dataLines.length - 1]) };
+      } catch { /* fall through */ }
     }
 
-    // Try plain JSON
+    // Plain JSON
     try {
-      const parsed = JSON.parse(body);
-      return { sessionId: this.sessionId, data: parsed };
+      return { sessionId: this.sessionId, data: JSON.parse(body) };
     } catch {
       return { sessionId: this.sessionId, data: null };
     }
