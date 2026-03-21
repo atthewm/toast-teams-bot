@@ -1,0 +1,49 @@
+{
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
+  "version": "0.1.0",
+  "id": "${{BOT_ID}}",
+  "developer": {
+    "name": "Toast MCP",
+    "websiteUrl": "https://github.com/atthewm/toast-teams-bot",
+    "privacyUrl": "https://github.com/atthewm/toast-teams-bot/blob/main/SECURITY.md",
+    "termsOfUseUrl": "https://github.com/atthewm/toast-teams-bot/blob/main/LICENSE"
+  },
+  "name": {
+    "short": "Toast Ops",
+    "full": "Toast Restaurant Operations Bot"
+  },
+  "description": {
+    "short": "Query Toast restaurant data from Teams",
+    "full": "AI powered bot for querying Toast POS data: menus, orders, configuration, and system health. Powered by the Toast MCP Server."
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "accentColor": "#FF6600",
+  "bots": [
+    {
+      "botId": "${{BOT_ID}}",
+      "scopes": ["personal", "team", "groupChat"],
+      "commandLists": [
+        {
+          "scopes": ["personal", "team", "groupChat"],
+          "commands": [
+            { "title": "health", "description": "Run a system health check" },
+            { "title": "menus", "description": "Show menu overview" },
+            { "title": "menu search", "description": "Search menu items" },
+            { "title": "orders", "description": "List today's orders" },
+            { "title": "config", "description": "Show restaurant configuration" },
+            { "title": "status", "description": "Check authentication status" },
+            { "title": "help", "description": "Show available commands" }
+          ]
+        }
+      ],
+      "supportsFiles": false,
+      "isNotificationOnly": false
+    }
+  ],
+  "permissions": ["identity", "messageTeamMembers"],
+  "validDomains": []
+}

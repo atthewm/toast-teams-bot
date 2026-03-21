@@ -1,0 +1,45 @@
+{
+  "name": "toast-teams-bot",
+  "version": "0.1.0",
+  "description": "Microsoft Teams bot for Toast restaurant operations. Connects to Toast MCP Server for AI powered restaurant queries, alerts, and dashboards.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "keywords": [
+    "teams",
+    "bot",
+    "toast",
+    "restaurant",
+    "mcp",
+    "adaptive-cards",
+    "copilot"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/atthewm/toast-teams-bot"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "botbuilder": "^4.23.3",
+    "botframework-connector": "^4.23.3",
+    "express": "^5.2.1",
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
