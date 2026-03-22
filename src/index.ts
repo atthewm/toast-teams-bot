@@ -4,6 +4,15 @@ import { appendFileSync } from "node:fs";
 import { App } from "@microsoft/teams.apps";
 import { loadConfig } from "./config/index.js";
 import { ToastMcpClient } from "./mcp/client.js";
+import {
+  dailySalesSummary,
+  marketplaceBreakdown,
+  rushRecap,
+  shiftRoster,
+  endOfDaySummary,
+} from "./reports/index.js";
+import { pollAlerts, resetAlertState } from "./alerts/monitor.js";
+import { buildDailySummary, saveSummary } from "./cache/history.js";
 
 // Write activity log to persistent file on Azure for debugging
 const LOG_FILE = "/home/LogFiles/bot-activity.log";
@@ -117,6 +126,15 @@ app.on("activity", async ({ activity, send, next }) => {
           "**orders** : Today's orders\n" +
           "**config** : Restaurant configuration\n" +
           "**status** : Authentication status\n\n" +
+          "**Reports:**\n" +
+          "**test sales** : Yesterday's sales summary\n" +
+          "**test marketplace** : Platform breakdown\n" +
+          "**test morning/lunch/afternoon** : Rush recaps\n" +
+          "**test alerts** : Check for active alerts\n" +
+          "**test drivethru** : Drive-thru speed report\n" +
+          "**test eod** : End of day summary with comparisons\n" +
+          "**test all** : Run all reports\n" +
+          "**reset alerts** : Clear alert state\n\n" +
           "**Admin:**\n" +
           "**register [channel]** : Register this channel for reports\n" +
           "**channels** : List registered channels\n\n" +
@@ -154,6 +172,107 @@ app.on("activity", async ({ activity, send, next }) => {
           msg += `**${name}**: registered by ${reg.registeredBy}\n`;
         }
         await send(msg);
+        return;
+      }
+
+      // Test reports: run a specific report and post the result here
+      const testMatch = lower.match(/^test\s+(sales|marketplace|morning|lunch|afternoon|roster|alerts|drive-?thru|eod|all)$/);
+      if (testMatch) {
+        const report = testMatch[1].replace("-", "");
+        await send(`Running **${report}** report...`);
+        try {
+          if (report === "sales" || report === "all") {
+            await send(await dailySalesSummary(mcp));
+          }
+          if (report === "marketplace" || report === "all") {
+            await send(await marketplaceBreakdown(mcp));
+          }
+          if (report === "morning" || report === "all") {
+            await send(await rushRecap(mcp, "Morning Rush Recap", 6, 10, config.timezone));
+          }
+          if (report === "lunch" || report === "all") {
+            await send(await rushRecap(mcp, "Lunch Rush Recap", 11, 14, config.timezone));
+          }
+          if (report === "afternoon" || report === "all") {
+            await send(await rushRecap(mcp, "Afternoon Recap", 14, 18, config.timezone));
+          }
+          if (report === "roster" || report === "all") {
+            await send(await shiftRoster(mcp));
+          }
+          if (report === "alerts" || report === "all") {
+            const alerts = await pollAlerts(mcp, config);
+            const count = alerts.largeOrders.length +
+              (alerts.voidAlert ? 1 : 0) +
+              (alerts.longOpenAlert ? 1 : 0) +
+              (alerts.driveThruAlert ? 1 : 0);
+            if (count === 0) {
+              await send("**Alert Check**: No active alerts right now.");
+            } else {
+              for (const msg of alerts.largeOrders) await send(msg);
+              if (alerts.voidAlert) await send(alerts.voidAlert);
+              if (alerts.longOpenAlert) await send(alerts.longOpenAlert);
+              if (alerts.driveThruAlert) await send(alerts.driveThruAlert);
+            }
+          }
+          if (report === "drivethru" || report === "all") {
+            // Show drive-thru speed stats even if no alert fires
+            const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+            const raw = await mcp.callToolText("toast_list_orders", { businessDate: dateStr, detailCount: 200 });
+            let data: { orders?: Array<{ diningOptionName?: string; openedDate?: string; closedDate?: string; voided?: boolean; displayNumber?: string; guid?: string }> } | null = null;
+            try { data = JSON.parse(raw); } catch { /* text */ }
+            const DT_NAMES = ["drive thru", "drive-thru", "drivethru", "drive through"];
+            const dtOrders = (data?.orders ?? []).filter((o) => {
+              if (!o.diningOptionName || !o.openedDate || !o.closedDate || o.voided) return false;
+              return DT_NAMES.some((n) => o.diningOptionName!.toLowerCase().includes(n));
+            });
+            if (dtOrders.length === 0) {
+              await send("**Drive-Thru Speed**: No completed drive-thru orders today.");
+            } else {
+              let total = 0;
+              let count2 = 0;
+              const lines: string[] = [];
+              for (const o of dtOrders) {
+                const sec = Math.round((new Date(o.closedDate!).getTime() - new Date(o.openedDate!).getTime()) / 1000);
+                if (sec > 0 && sec < 3600) {
+                  total += sec;
+                  count2++;
+                  const m = Math.floor(sec / 60);
+                  const s = sec % 60;
+                  const num = o.displayNumber ?? o.guid?.slice(0, 8) ?? "?";
+                  lines.push(`#${num}: ${m}:${String(s).padStart(2, "0")}`);
+                }
+              }
+              const avg = count2 > 0 ? Math.round(total / count2) : 0;
+              const avgM = Math.floor(avg / 60);
+              const avgS = avg % 60;
+              const status = avg <= 90 ? "ON TARGET" : `${avg - 90}s OVER`;
+              let msg = `**Drive-Thru Speed Report**\n\n`;
+              msg += `Average: **${avgM}:${String(avgS).padStart(2, "0")}** (target: 1:30) ${status}\n`;
+              msg += `Completed: **${count2}** orders\n\n`;
+              for (const line of lines.slice(-10)) {
+                msg += `${line}\n`;
+              }
+              msg += `\n**Every order through in 1:30. That's the standard.**`;
+              await send(msg);
+            }
+          }
+          if (report === "eod" || report === "all") {
+            const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+            await send("Building end of day summary...");
+            const summary = await buildDailySummary(mcp, dateStr, config.timezone);
+            saveSummary(summary);
+            await send(await endOfDaySummary(mcp, config.timezone, summary));
+          }
+        } catch (err) {
+          await send(`Report error: ${(err as Error).message.slice(0, 200)}`);
+        }
+        return;
+      }
+
+      // Reset alerts: clear persisted alert state
+      if (lower === "reset alerts") {
+        resetAlertState();
+        await send("**Alert state reset.** All seen orders cleared. Next poll will evaluate fresh.");
         return;
       }
 
@@ -201,8 +320,12 @@ app.on("activity", async ({ activity, send, next }) => {
 
       // Natural language fallback
       if (prompt) {
-        const memory = getMemory(activity.conversation?.id ?? "default");
+        // Use channel ID without message suffix as stable key
+        const convKey = (activity.conversation?.id ?? "default").split(";")[0];
+        const memory = getMemory(convKey);
+        await memory.push({ role: "user" as const, content: text });
         const response = await prompt.send(text, { messages: memory });
+        await memory.push(response);
         await send(response.content ?? "No response. Try a direct command.");
         return;
       }
@@ -644,10 +767,12 @@ app.on("message", async ({ send, activity }) => {
 
   try {
     log("AI query from", activity.from?.name ?? "unknown", ":", text.slice(0, 100));
-    const conversationId = activity.conversation?.id ?? "default";
-    const memory = getMemory(conversationId);
+    const convKey = (activity.conversation?.id ?? "default").split(";")[0];
+    const memory = getMemory(convKey);
+    await memory.push({ role: "user" as const, content: text });
 
     const response = await prompt.send(text, { messages: memory });
+    await memory.push(response);
 
     const reply = response.content ?? "I wasn't able to generate a response. Try rephrasing or use a direct command.";
 
@@ -672,8 +797,8 @@ app.start(config.port).then(() => {
   log("AI:", config.openaiModel, "| Timezone:", config.timezone);
   log("MCP:", config.mcpServerUrl);
 
-  // Start the scheduler for automated reports
-  startScheduler(app, mcp, config.timezone);
+  // Start the scheduler for automated reports and real-time alerts
+  startScheduler(app, mcp, config.timezone, config);
 }).catch((err) => {
   log("Fatal:", err.message);
   process.exit(1);

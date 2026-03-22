@@ -33,6 +33,11 @@ export interface BotConfig {
   // RBAC
   adminGroupId: string | undefined;
   managerGroupId: string | undefined;
+  // Alert thresholds
+  largeOrderDollars: number;
+  largeOrderItems: number;
+  highVoidCount: number;
+  longOpenMinutes: number;
 }
 
 export function loadConfig(): BotConfig {
@@ -74,5 +79,9 @@ export function loadConfig(): BotConfig {
     timezone: env.TIMEZONE ?? "America/Chicago",
     adminGroupId: env.ADMIN_GROUP_ID,
     managerGroupId: env.MANAGER_GROUP_ID,
+    largeOrderDollars: parseInt(env.LARGE_ORDER_DOLLARS ?? "50", 10),
+    largeOrderItems: parseInt(env.LARGE_ORDER_ITEMS ?? "10", 10),
+    highVoidCount: parseInt(env.HIGH_VOID_COUNT ?? "3", 10),
+    longOpenMinutes: parseInt(env.LONG_OPEN_MINUTES ?? "30", 10),
   };
 }

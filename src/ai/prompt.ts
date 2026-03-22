@@ -65,7 +65,7 @@ export function createChatPrompt(config: BotConfig) {
 export function getMemory(conversationId: string): LocalMemory {
   let memory = memories.get(conversationId);
   if (!memory) {
-    memory = new LocalMemory({ max: 20 });
+    memory = new LocalMemory({ max: 40 });
     memories.set(conversationId, memory);
   }
   return memory;
