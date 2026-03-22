@@ -18,24 +18,46 @@ import {
   type RoleConfig,
 } from "./auth/roles.js";
 
+// Use console.log (stdout) for Azure App Service log capture
+const log = (...args: unknown[]) => console.log("[Bot]", ...args);
+
 const config = loadConfig();
+log("Config loaded. MCP:", config.mcpServerUrl, "Model:", config.openaiModel);
 
 const app = new App({
   clientId: config.botId,
   clientSecret: config.botPassword,
   tenantId: config.botTenantId,
   activity: { mentions: { stripText: true } },
+  manifest: {
+    name: { short: "Toast Ops", full: "Toast Restaurant Operations Bot" },
+    bots: [{
+      botId: config.botId,
+      scopes: ["personal", "team", "groupChat"],
+    }],
+  },
 });
 
 const mcp = new ToastMcpClient(config.mcpServerUrl, config.mcpApiKey);
-const { prompt } = createChatPrompt(config);
+
+let prompt: ReturnType<typeof createChatPrompt>["prompt"];
+try {
+  const ai = createChatPrompt(config);
+  prompt = ai.prompt;
+  log("AI prompt initialized");
+} catch (err) {
+  log("AI prompt init failed:", (err as Error).message);
+  // Create a fallback so the app still starts without AI
+  prompt = null as unknown as typeof prompt;
+}
+
 const roleConfig: RoleConfig = {
   adminGroupId: config.adminGroupId,
   managerGroupId: config.managerGroupId,
 };
 
 mcp.connect().catch((err) => {
-  console.error(`[Bot] MCP connect failed, will retry on first message: ${err.message}`);
+  log("MCP connect failed, will retry on first message:", err.message);
 });
 
 // -- Role resolution cache (per session, not persisted) --
@@ -367,6 +389,7 @@ app.on("message", async ({ send, activity }) => {
   const raw = activity.text ?? "";
   // Strip <at>Bot Name</at> tags that Teams injects for @mentions in channels
   const text = raw.replace(/<at[^>]*>.*?<\/at>/gi, "").trim();
+  log("Fallback handler. Raw:", JSON.stringify(raw).slice(0, 120), "| Stripped:", text.slice(0, 80));
 
   if (text.length < 2) {
     await send("Type **help** to see commands, or ask me anything.");
@@ -457,7 +480,13 @@ app.on("message", async ({ send, activity }) => {
     return;
   }
 
+  if (!prompt) {
+    await send("AI mode is not available (initialization failed). Use direct commands instead. Type **help**.");
+    return;
+  }
+
   try {
+    log("AI query from", activity.from?.name ?? "unknown", ":", text.slice(0, 100));
     const conversationId = activity.conversation?.id ?? "default";
     const memory = getMemory(conversationId);
 
@@ -468,7 +497,7 @@ app.on("message", async ({ send, activity }) => {
     await send(reply);
   } catch (err) {
     const errMsg = (err as Error).message;
-    console.error(`[AI] Error: ${errMsg}`);
+    log("AI error:", errMsg);
 
     if (errMsg.includes("401") || errMsg.includes("auth")) {
       await send("AI service authentication error. Check the OPENAI_API_KEY configuration.");
@@ -481,14 +510,16 @@ app.on("message", async ({ send, activity }) => {
 });
 
 // ---- Start ----
-app.start(config.port).catch((err) => {
-  console.error(`[Bot] Fatal: ${err.message}`);
+app.start(config.port).then(() => {
+  log("Toast Teams Bot v0.2.0 listening on port", config.port);
+  log("AI:", config.openaiModel, "| Timezone:", config.timezone);
+  log("MCP:", config.mcpServerUrl);
+
+  // Start the scheduler for automated reports
+  startScheduler(app, mcp, config.timezone);
+}).catch((err) => {
+  log("Fatal:", err.message);
   process.exit(1);
 });
-
-// Start the scheduler for automated reports
-startScheduler(app, mcp, config.timezone);
-
-console.error(`[Bot] Toast Teams Bot v0.2.0 starting on port ${config.port}`);
 console.error(`[Bot] AI: ${config.openaiModel}, Timezone: ${config.timezone}`);
 console.error(`[Bot] MCP: ${config.mcpServerUrl}`);
