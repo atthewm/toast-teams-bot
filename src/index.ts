@@ -60,6 +60,23 @@ mcp.connect().catch((err) => {
   log("MCP connect failed, will retry on first message:", err.message);
 });
 
+// -- Activity log for diagnostics --
+const activityLog: Array<{ time: string; type: string; from: string; convType: string; text: string }> = [];
+
+// Log EVERY incoming activity so we can see what reaches the bot
+app.on("activity", async ({ activity }) => {
+  const entry = {
+    time: new Date().toISOString(),
+    type: String(activity.type ?? "unknown"),
+    from: activity.from?.name ?? activity.from?.id ?? "?",
+    convType: String(activity.conversation?.conversationType ?? "?"),
+    text: String((activity as unknown as Record<string, unknown>).text ?? "").slice(0, 100),
+  };
+  activityLog.push(entry);
+  if (activityLog.length > 50) activityLog.shift();
+  log("ACTIVITY:", JSON.stringify(entry));
+});
+
 // -- Role resolution cache (per session, not persisted) --
 const roleCache = new Map<string, { role: Role; expires: number }>();
 const ROLE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
@@ -510,6 +527,24 @@ app.on("message", async ({ send, activity }) => {
 });
 
 // ---- Start ----
+// Diagnostic HTTP server on a separate port so we can check status without auth
+import { createServer } from "node:http";
+const diagPort = parseInt(process.env.DIAG_PORT ?? "3979", 10);
+createServer((req, res) => {
+  res.setHeader("Content-Type", "application/json");
+  if (req.url === "/diag") {
+    res.end(JSON.stringify({
+      status: "running",
+      uptime: process.uptime(),
+      activities: activityLog,
+      channels: getAllChannels(),
+      mcp: mcp.isConnected(),
+    }, null, 2));
+  } else {
+    res.end(JSON.stringify({ status: "running", uptime: process.uptime() }));
+  }
+}).listen(diagPort, () => log("Diag server on port", diagPort));
+
 app.start(config.port).then(() => {
   log("Toast Teams Bot v0.2.0 listening on port", config.port);
   log("AI:", config.openaiModel, "| Timezone:", config.timezone);
@@ -521,5 +556,3 @@ app.start(config.port).then(() => {
   log("Fatal:", err.message);
   process.exit(1);
 });
-console.error(`[Bot] AI: ${config.openaiModel}, Timezone: ${config.timezone}`);
-console.error(`[Bot] MCP: ${config.mcpServerUrl}`);
