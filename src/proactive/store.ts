@@ -87,6 +87,6 @@ export function removeChannel(name: string): boolean {
  */
 export const CHANNEL_NAMES = {
   FINANCE: "finance",
-  OPS_CONTROL: "ops-control",
-  MARKETING: "marketing",
+  OPS_CONTROL: "ops",
+  MARKETING: "marketplace",
 } as const;
