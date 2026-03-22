@@ -25,6 +25,14 @@ export interface BotConfig {
   mcpApiKey: string | undefined;
   port: number;
   logLevel: string;
+  // AI
+  openaiApiKey: string;
+  openaiModel: string;
+  // Scheduling
+  timezone: string;
+  // RBAC
+  adminGroupId: string | undefined;
+  managerGroupId: string | undefined;
 }
 
 export function loadConfig(): BotConfig {
@@ -37,12 +45,14 @@ export function loadConfig(): BotConfig {
   const botPassword = env.ENTRA_APP_CLIENT_SECRET ?? env.BOT_PASSWORD;
   const botTenantId = env.ENTRA_TENANT_ID ?? env.BOT_TENANT_ID;
   const mcpServerUrl = env.MCP_SERVER_URL;
+  const openaiApiKey = env.OPENAI_API_KEY;
 
   const missing: string[] = [];
   if (!botId) missing.push("ENTRA_APP_CLIENT_ID (or BOT_ID)");
   if (!botPassword) missing.push("ENTRA_APP_CLIENT_SECRET (or BOT_PASSWORD)");
   if (!botTenantId) missing.push("ENTRA_TENANT_ID (or BOT_TENANT_ID)");
   if (!mcpServerUrl) missing.push("MCP_SERVER_URL");
+  if (!openaiApiKey) missing.push("OPENAI_API_KEY");
 
   if (missing.length > 0) {
     throw new Error(
@@ -59,5 +69,10 @@ export function loadConfig(): BotConfig {
     mcpApiKey: env.MCP_API_KEY,
     port: parseInt(env.PORT ?? "3978", 10),
     logLevel: env.LOG_LEVEL ?? "info",
+    openaiApiKey: openaiApiKey!,
+    openaiModel: env.OPENAI_MODEL ?? "gpt-4o",
+    timezone: env.TIMEZONE ?? "America/Chicago",
+    adminGroupId: env.ADMIN_GROUP_ID,
+    managerGroupId: env.MANAGER_GROUP_ID,
   };
 }

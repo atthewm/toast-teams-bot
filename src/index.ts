@@ -3,6 +3,20 @@
 import { App } from "@microsoft/teams.apps";
 import { loadConfig } from "./config/index.js";
 import { ToastMcpClient } from "./mcp/client.js";
+import { createChatPrompt, getMemory } from "./ai/prompt.js";
+import { startScheduler } from "./scheduler/index.js";
+import {
+  registerChannel,
+  getAllChannels,
+  removeChannel,
+} from "./proactive/store.js";
+import {
+  hasPermission,
+  resolveRole,
+  denyMessage,
+  type Role,
+  type RoleConfig,
+} from "./auth/roles.js";
 
 const config = loadConfig();
 
@@ -10,37 +24,76 @@ const app = new App({
   clientId: config.botId,
   clientSecret: config.botPassword,
   tenantId: config.botTenantId,
+  activity: { mentions: { stripText: true } },
 });
 
 const mcp = new ToastMcpClient(config.mcpServerUrl, config.mcpApiKey);
+const { prompt } = createChatPrompt(config);
+const roleConfig: RoleConfig = {
+  adminGroupId: config.adminGroupId,
+  managerGroupId: config.managerGroupId,
+};
 
 mcp.connect().catch((err) => {
   console.error(`[Bot] MCP connect failed, will retry on first message: ${err.message}`);
 });
 
-// Help
+// -- Role resolution cache (per session, not persisted) --
+const roleCache = new Map<string, { role: Role; expires: number }>();
+const ROLE_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+async function getUserRole(userId: string): Promise<Role> {
+  // If no groups configured, everyone is admin (open access)
+  if (!roleConfig.adminGroupId && !roleConfig.managerGroupId) {
+    return "admin";
+  }
+
+  const cached = roleCache.get(userId);
+  if (cached && Date.now() < cached.expires) {
+    return cached.role;
+  }
+
+  // Fetch groups via Graph (requires bot token with Group.Read permissions)
+  // For now, default to admin since we need Graph consent setup
+  // TODO: Wire up Graph token once admin consent is granted
+  const groups: string[] = [];
+  const role = resolveRole(groups, roleConfig);
+
+  roleCache.set(userId, { role, expires: Date.now() + ROLE_CACHE_TTL });
+  return role;
+}
+
+// ---- Command: help ----
 app.message(/^(help|\?)$/i, async ({ send }) => {
   await send(
     "**Toast Operations Bot**\n\n" +
-    "Commands:\n" +
-    "- **health** : Run a system health check\n" +
-    "- **menus** : Show menu overview\n" +
-    "- **menu search [term]** : Search menu items\n" +
-    "- **orders** : List today's orders\n" +
-    "- **config** : Show restaurant configuration\n" +
-    "- **status** : Check authentication status\n" +
-    "- **capabilities** : Show available features"
+    "**Commands:**\n" +
+    "**health** : System health check\n" +
+    "**menus** : Menu overview\n" +
+    "**menu search [term]** : Search menu items\n" +
+    "**orders** : Today's orders\n" +
+    "**config** : Restaurant configuration\n" +
+    "**status** : Authentication status\n" +
+    "**capabilities** : Available API features\n\n" +
+    "**Admin:**\n" +
+    "**register [channel]** : Register this channel for reports (e.g. register ops-control)\n" +
+    "**channels** : List registered channels\n" +
+    "**unregister [channel]** : Remove a channel registration\n\n" +
+    "Or just ask me anything in plain English!"
   );
 });
 
-// Health
-app.message(/^health(check)?$/i, async ({ send }) => {
+// ---- Command: health ----
+app.message(/^health(check)?$/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "health")) { await send(denyMessage("health")); return; }
+
   await send("Running health check...");
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_healthcheck");
     if (!data) { await send(await mcp.callToolText("toast_healthcheck")); return; }
     const checks = data.checks as Record<string, { status: string; message: string; durationMs?: number }>;
-    const config = data.config as Record<string, unknown>;
+    const cfg = data.config as Record<string, unknown>;
 
     let text = `**Health: ${data.overall}**\n\n`;
     if (checks) {
@@ -51,8 +104,8 @@ app.message(/^health(check)?$/i, async ({ send }) => {
         text += "\n";
       }
     }
-    if (config) {
-      text += `\nRestaurants: ${config.restaurantsConfigured}, Writes: ${config.writesEnabled ? "On" : "Off"}, Dry Run: ${config.dryRun ? "Yes" : "No"}`;
+    if (cfg) {
+      text += `\nRestaurants: ${cfg.restaurantsConfigured}, Writes: ${cfg.writesEnabled ? "On" : "Off"}, Dry Run: ${cfg.dryRun ? "Yes" : "No"}`;
     }
     await send(text);
   } catch (err) {
@@ -60,9 +113,12 @@ app.message(/^health(check)?$/i, async ({ send }) => {
   }
 });
 
-// Menu search
+// ---- Command: menu search ----
 app.message(/^(menu search|search menu)\s+(.+)/i, async ({ send, activity }) => {
-  const match = activity.text?.match(/^(menu search|search menu)\s+(.+)/i);
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "search")) { await send(denyMessage("search")); return; }
+
+  const match = activity.text?.match(/(menu search|search menu)\s+(.+)/i);
   const query = match?.[2]?.trim() ?? "";
   if (!query) {
     await send("Please provide a search term. Example: **menu search espresso**");
@@ -71,12 +127,9 @@ app.message(/^(menu search|search menu)\s+(.+)/i, async ({ send, activity }) => 
 
   await send(`Searching for "${query}"...`);
   try {
-    // Use callToolText since the MCP tool may return plain text for no results
     const rawText = await mcp.callToolText("toast_search_menu_items", { query });
-
-    // Try to parse as JSON (structured results)
     let data: { results?: Array<{ item: { name: string; price?: number }; menuName: string; groupName: string }> } | null = null;
-    try { data = JSON.parse(rawText); } catch { /* plain text response */ }
+    try { data = JSON.parse(rawText); } catch { /* plain text */ }
 
     if (!data || !data.results || data.results.length === 0) {
       await send(`No items found matching "${query}".`);
@@ -97,8 +150,11 @@ app.message(/^(menu search|search menu)\s+(.+)/i, async ({ send, activity }) => 
   }
 });
 
-// Menus
-app.message(/^menus?$/i, async ({ send }) => {
+// ---- Command: menus ----
+app.message(/^menus?$/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "menus")) { await send(denyMessage("menus")); return; }
+
   try {
     const data = await mcp.callToolJson<{
       menuCount: number;
@@ -120,15 +176,29 @@ app.message(/^menus?$/i, async ({ send }) => {
   }
 });
 
-// Orders
-app.message(/^orders?(\s+today)?$/i, async ({ send }) => {
+// ---- Command: orders ----
+app.message(/^orders?(\s+today)?$/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "orders")) { await send(denyMessage("orders")); return; }
+
   await send("Fetching today's orders...");
   try {
     const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-    // The MCP tool returns { count, orders } but fallback to raw text
     const rawText = await mcp.callToolText("toast_list_orders", { businessDate: today });
 
-    let data: { count?: number; orders?: Array<{ guid?: string; server?: { name?: string }; checks?: Array<{ totalAmount?: number }> }> } | null = null;
+    let data: {
+      totalOrders?: number;
+      totalSales?: number;
+      detailsFetched?: number;
+      orders?: Array<{
+        guid?: string;
+        displayNumber?: string;
+        openedDate?: string;
+        total?: number;
+        itemCount?: number;
+        voided?: boolean;
+      }>;
+    } | null = null;
     try { data = JSON.parse(rawText); } catch { /* plain text */ }
 
     if (!data || !data.orders || data.orders.length === 0) {
@@ -136,14 +206,17 @@ app.message(/^orders?(\s+today)?$/i, async ({ send }) => {
       return;
     }
 
-    let text = `**Orders for ${today}** (${data.count ?? data.orders.length})\n\n`;
-    for (const o of data.orders.slice(0, 20)) {
-      const guid = o.guid ?? "unknown";
-      const total = o.checks?.reduce((s, c) => s + (c.totalAmount ?? 0), 0)?.toFixed(2);
-      text += `${guid.slice(0, 8)}... ${o.server?.name ?? ""} ${total ? `$${total}` : ""}\n`;
-    }
-    if (data.orders.length > 20) {
-      text += `\n... and ${data.orders.length - 20} more`;
+    let text = `**Orders for ${today}**\n\n`;
+    text += `Total orders: **${data.totalOrders}**\n`;
+    text += `Total sales: **$${data.totalSales?.toFixed(2) ?? "N/A"}**\n`;
+    text += `(showing ${data.detailsFetched} of ${data.totalOrders})\n\n`;
+
+    for (const o of data.orders) {
+      if (o.voided) continue;
+      const num = o.displayNumber ?? o.guid?.slice(0, 8) ?? "?";
+      const total = o.total != null ? `$${o.total.toFixed(2)}` : "";
+      const items = o.itemCount ? `${o.itemCount} item${o.itemCount === 1 ? "" : "s"}` : "";
+      text += `#${num} ${total} ${items}\n`;
     }
     await send(text);
   } catch (err) {
@@ -151,8 +224,11 @@ app.message(/^orders?(\s+today)?$/i, async ({ send }) => {
   }
 });
 
-// Config
-app.message(/^config(uration)?$/i, async ({ send }) => {
+// ---- Command: config ----
+app.message(/^config(uration)?$/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "config")) { await send(denyMessage("config")); return; }
+
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_get_config_summary");
     if (!data) { await send(await mcp.callToolText("toast_get_config_summary")); return; }
@@ -180,8 +256,11 @@ app.message(/^config(uration)?$/i, async ({ send }) => {
   }
 });
 
-// Status
-app.message(/^(status|auth)$/i, async ({ send }) => {
+// ---- Command: status ----
+app.message(/^(status|auth)$/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "status")) { await send(denyMessage("status")); return; }
+
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_auth_status");
     if (!data) { await send(await mcp.callToolText("toast_auth_status")); return; }
@@ -198,8 +277,11 @@ app.message(/^(status|auth)$/i, async ({ send }) => {
   }
 });
 
-// Capabilities
-app.message(/^capabilities$/i, async ({ send }) => {
+// ---- Command: capabilities ----
+app.message(/^capabilities$/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "capabilities")) { await send(denyMessage("capabilities")); return; }
+
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_api_capabilities");
     await send(`**API Capabilities**\n\n\`\`\`json\n${JSON.stringify(data, null, 2).slice(0, 2000)}\n\`\`\``);
@@ -208,61 +290,205 @@ app.message(/^capabilities$/i, async ({ send }) => {
   }
 });
 
-// Fallback: show what we actually received for debugging
+// ---- Command: register [channel-name] ----
+app.message(/^register\s+(\S+)/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "register")) { await send(denyMessage("register")); return; }
+
+  const match = activity.text?.match(/register\s+(\S+)/i);
+  const channelName = match?.[1]?.toLowerCase();
+  if (!channelName) {
+    await send("Usage: **register [channel-name]**\n\nExamples: register ops-control, register finance, register marketing");
+    return;
+  }
+
+  const conversationId = activity.conversation?.id ?? "";
+  const serviceUrl = (activity as unknown as Record<string, unknown>).serviceUrl as string ?? "";
+  const teamId = activity.conversation?.tenantId ?? "";
+  const userName = activity.from?.name ?? activity.from?.id ?? "unknown";
+
+  if (!conversationId) {
+    await send("Could not detect conversation ID. Make sure you run this in a Teams channel.");
+    return;
+  }
+
+  const reg = registerChannel(channelName, conversationId, serviceUrl, userName, teamId);
+
+  await send(
+    `**Channel Registered**\n\n` +
+    `Name: **${reg.name}**\n` +
+    `Conversation ID: \`${reg.conversationId}\`\n` +
+    `Registered by: ${reg.registeredBy}\n\n` +
+    `This channel will now receive scheduled reports targeted to **#${channelName}**.`
+  );
+});
+
+// ---- Command: channels ----
+app.message(/^channels$/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "register")) { await send(denyMessage("channels")); return; }
+
+  const channels = getAllChannels();
+  const entries = Object.entries(channels);
+
+  if (entries.length === 0) {
+    await send("No channels registered. Use **register [name]** in a channel to set it up.");
+    return;
+  }
+
+  let text = `**Registered Channels (${entries.length})**\n\n`;
+  for (const [name, reg] of entries) {
+    text += `**${name}**: \`${reg.conversationId.slice(0, 30)}...\` (by ${reg.registeredBy})\n`;
+  }
+  await send(text);
+});
+
+// ---- Command: unregister [channel-name] ----
+app.message(/^unregister\s+(\S+)/i, async ({ send, activity }) => {
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "register")) { await send(denyMessage("unregister")); return; }
+
+  const match = activity.text?.match(/unregister\s+(\S+)/i);
+  const channelName = match?.[1]?.toLowerCase();
+  if (!channelName) {
+    await send("Usage: **unregister [channel-name]**");
+    return;
+  }
+
+  if (removeChannel(channelName)) {
+    await send(`Channel **${channelName}** unregistered. It will no longer receive reports.`);
+  } else {
+    await send(`Channel **${channelName}** was not registered.`);
+  }
+});
+
+// ---- Fallback: handles @mention stripping + natural language ----
 app.on("message", async ({ send, activity }) => {
   const raw = activity.text ?? "";
-  // Strip any bot @mention tags that Teams may include
+  // Strip <at>Bot Name</at> tags that Teams injects for @mentions in channels
   const text = raw.replace(/<at[^>]*>.*?<\/at>/gi, "").trim();
 
   if (text.length < 2) {
-    await send("Type **help** to see available commands.");
+    await send("Type **help** to see commands, or ask me anything.");
     return;
   }
 
-  // Try to match commands manually since Teams may alter the text
   const lower = text.toLowerCase();
 
-  if (lower === "help" || lower === "?") {
-    await send("Use one of: **health**, **menus**, **menu search [term]**, **orders**, **config**, **status**, **capabilities**");
+  // Skip commands that the app.message() regex handlers already caught.
+  // Only skip commands that DON'T need fallback handling (i.e. the ones
+  // where stripText reliably works). Admin commands (register, channels,
+  // unregister) are handled below because @mention stripping is unreliable.
+  if (
+    /^(help|\?|health(check)?|menus?|menu search .+|search menu .+|orders?(\s+today)?|config(uration)?|status|auth|capabilities)$/i.test(lower)
+  ) {
     return;
   }
 
-  if (lower.startsWith("menu search ") || lower.startsWith("search menu ") || lower.startsWith("search ")) {
-    const query = lower.replace(/^(menu search|search menu|search)\s+/, "").trim();
-    if (query) {
-      await send(`Searching for "${query}"...`);
-      try {
-        const rawText = await mcp.callToolText("toast_search_menu_items", { query });
-        let data: { results?: Array<{ item: { name: string; price?: number }; menuName: string; groupName: string }> } | null = null;
-        try { data = JSON.parse(rawText); } catch { /* plain text */ }
-        if (!data || !data.results || data.results.length === 0) {
-          await send(`No items found matching "${query}".`);
-          return;
-        }
-        let msg = `**Menu Search: "${query}"** (${data.results.length} results)\n\n`;
-        for (const r of data.results.slice(0, 15)) {
-          const price = r.item.price != null ? `$${r.item.price.toFixed(2)}` : "N/A";
-          msg += `**${r.item.name}** ${price} (${r.menuName} > ${r.groupName})\n`;
-        }
-        await send(msg);
-      } catch (err) {
-        await send(`Search failed: ${(err as Error).message}`);
-      }
+  // ---- register [channel-name] (fallback for @mention in channels) ----
+  const registerMatch = lower.match(/^register\s+(\S+)$/);
+  if (registerMatch) {
+    const role = await getUserRole(activity.from?.id ?? "");
+    if (!hasPermission(role, "register")) { await send(denyMessage("register")); return; }
+
+    const channelName = registerMatch[1];
+    const conversationId = activity.conversation?.id ?? "";
+    const serviceUrl = (activity as unknown as Record<string, unknown>).serviceUrl as string ?? "";
+    const teamId = activity.conversation?.tenantId ?? "";
+    const userName = activity.from?.name ?? activity.from?.id ?? "unknown";
+
+    if (!conversationId) {
+      await send("Could not detect conversation ID. Make sure you run this in a Teams channel.");
       return;
     }
-  }
 
-  if (lower === "menus" || lower === "menu") {
-    await send("Fetching menus... (try the **menus** command)");
+    const reg = registerChannel(channelName, conversationId, serviceUrl, userName, teamId);
+
+    await send(
+      `**Channel Registered**\n\n` +
+      `Name: **${reg.name}**\n` +
+      `Conversation ID: \`${reg.conversationId}\`\n` +
+      `Registered by: ${reg.registeredBy}\n\n` +
+      `This channel will now receive scheduled reports targeted to **#${channelName}**.`
+    );
     return;
   }
 
-  await send(`Did not match command: "${text}" (raw: "${raw.slice(0, 100)}"). Type **help** for commands.`);
+  // ---- channels (fallback) ----
+  if (lower === "channels") {
+    const role = await getUserRole(activity.from?.id ?? "");
+    if (!hasPermission(role, "register")) { await send(denyMessage("channels")); return; }
+
+    const channels = getAllChannels();
+    const entries = Object.entries(channels);
+
+    if (entries.length === 0) {
+      await send("No channels registered. Use **register [name]** in a channel to set it up.");
+      return;
+    }
+
+    let msg = `**Registered Channels (${entries.length})**\n\n`;
+    for (const [name, reg] of entries) {
+      msg += `**${name}**: \`${reg.conversationId.slice(0, 30)}...\` (by ${reg.registeredBy})\n`;
+    }
+    await send(msg);
+    return;
+  }
+
+  // ---- unregister [channel-name] (fallback) ----
+  const unregisterMatch = lower.match(/^unregister\s+(\S+)$/);
+  if (unregisterMatch) {
+    const role = await getUserRole(activity.from?.id ?? "");
+    if (!hasPermission(role, "register")) { await send(denyMessage("unregister")); return; }
+
+    const channelName = unregisterMatch[1];
+    if (removeChannel(channelName)) {
+      await send(`Channel **${channelName}** unregistered. It will no longer receive reports.`);
+    } else {
+      await send(`Channel **${channelName}** was not registered.`);
+    }
+    return;
+  }
+
+  // ---- Natural language: route through ChatPrompt + OpenAI + MCP ----
+  const role = await getUserRole(activity.from?.id ?? "");
+  if (!hasPermission(role, "ai")) {
+    await send("You don't have permission to use the AI assistant. Type **help** for available commands.");
+    return;
+  }
+
+  try {
+    const conversationId = activity.conversation?.id ?? "default";
+    const memory = getMemory(conversationId);
+
+    const response = await prompt.send(text, { messages: memory });
+
+    const reply = response.content ?? "I wasn't able to generate a response. Try rephrasing or use a direct command.";
+
+    await send(reply);
+  } catch (err) {
+    const errMsg = (err as Error).message;
+    console.error(`[AI] Error: ${errMsg}`);
+
+    if (errMsg.includes("401") || errMsg.includes("auth")) {
+      await send("AI service authentication error. Check the OPENAI_API_KEY configuration.");
+    } else if (errMsg.includes("429") || errMsg.includes("rate")) {
+      await send("AI service is rate limited. Try again in a moment, or use a direct command.");
+    } else {
+      await send(`AI error: ${errMsg.slice(0, 200)}\n\nTry using a direct command instead (type **help**).`);
+    }
+  }
 });
 
+// ---- Start ----
 app.start(config.port).catch((err) => {
   console.error(`[Bot] Fatal: ${err.message}`);
   process.exit(1);
 });
 
-console.error(`[Bot] Toast Teams Bot starting on port ${config.port}`);
+// Start the scheduler for automated reports
+startScheduler(app, mcp, config.timezone);
+
+console.error(`[Bot] Toast Teams Bot v0.2.0 starting on port ${config.port}`);
+console.error(`[Bot] AI: ${config.openaiModel}, Timezone: ${config.timezone}`);
+console.error(`[Bot] MCP: ${config.mcpServerUrl}`);
