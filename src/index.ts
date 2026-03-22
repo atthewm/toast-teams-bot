@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 
+import { appendFileSync } from "node:fs";
 import { App } from "@microsoft/teams.apps";
 import { loadConfig } from "./config/index.js";
 import { ToastMcpClient } from "./mcp/client.js";
+
+// Write activity log to persistent file on Azure for debugging
+const LOG_FILE = "/home/LogFiles/bot-activity.log";
+function logToFile(msg: string) {
+  const line = `${new Date().toISOString()} ${msg}\n`;
+  try { appendFileSync(LOG_FILE, line); } catch { /* not on Azure */ }
+}
 import { createChatPrompt, getMemory } from "./ai/prompt.js";
 import { startScheduler } from "./scheduler/index.js";
 import {
@@ -64,7 +72,7 @@ mcp.connect().catch((err) => {
 const activityLog: Array<{ time: string; type: string; from: string; convType: string; text: string }> = [];
 
 // Log EVERY incoming activity so we can see what reaches the bot
-app.on("activity", async ({ activity }) => {
+app.on("activity", async ({ activity, send, next }) => {
   const entry = {
     time: new Date().toISOString(),
     type: String(activity.type ?? "unknown"),
@@ -75,6 +83,136 @@ app.on("activity", async ({ activity }) => {
   activityLog.push(entry);
   if (activityLog.length > 50) activityLog.shift();
   log("ACTIVITY:", JSON.stringify(entry));
+  logToFile("ACTIVITY: " + JSON.stringify(entry));
+
+  // Teams SDK v2 does not route channel messages to app.message() / app.on("message").
+  // Handle channel messages here directly. Personal messages pass through to app.message() handlers.
+  if (
+    String(activity.type) !== "message" ||
+    String(activity.conversation?.conversationType) === "personal"
+  ) {
+    await next();
+    return;
+  }
+
+  // Channel message handling below
+  {
+    const raw = String((activity as unknown as Record<string, unknown>).text ?? "");
+    const text = raw.replace(/<at[^>]*>.*?<\/at>/gi, "").trim();
+    logToFile("CHANNEL_MSG: stripped=" + text);
+
+    if (text.length < 2) return;
+
+    const lower = text.toLowerCase();
+
+    try {
+      // Help
+      if (lower === "help" || lower === "?") {
+        await send(
+          "**Toast Operations Bot**\n\n" +
+          "**Commands:**\n" +
+          "**health** : System health check\n" +
+          "**menus** : Menu overview\n" +
+          "**menu search [term]** : Search menu items\n" +
+          "**orders** : Today's orders\n" +
+          "**config** : Restaurant configuration\n" +
+          "**status** : Authentication status\n\n" +
+          "**Admin:**\n" +
+          "**register [channel]** : Register this channel for reports\n" +
+          "**channels** : List registered channels\n\n" +
+          "Or just ask me anything in plain English!"
+        );
+        return;
+      }
+
+      // Register
+      const registerMatch = lower.match(/^register\s+(\S+)$/);
+      if (registerMatch) {
+        const channelName = registerMatch[1];
+        const conversationId = activity.conversation?.id ?? "";
+        const serviceUrl = String((activity as unknown as Record<string, unknown>).serviceUrl ?? "");
+        const userName = activity.from?.name ?? "unknown";
+        if (!conversationId) { await send("Could not detect conversation ID."); return; }
+        const reg = registerChannel(channelName, conversationId, serviceUrl, userName);
+        await send(
+          `**Channel Registered**\n\n` +
+          `Name: **${reg.name}**\n` +
+          `Conversation ID: \`${reg.conversationId}\`\n` +
+          `Registered by: ${reg.registeredBy}\n\n` +
+          `This channel will now receive scheduled reports targeted to **#${channelName}**.`
+        );
+        return;
+      }
+
+      // Channels
+      if (lower === "channels") {
+        const channels = getAllChannels();
+        const entries = Object.entries(channels);
+        if (entries.length === 0) { await send("No channels registered."); return; }
+        let msg = `**Registered Channels (${entries.length})**\n\n`;
+        for (const [name, reg] of entries) {
+          msg += `**${name}**: registered by ${reg.registeredBy}\n`;
+        }
+        await send(msg);
+        return;
+      }
+
+      // Health
+      if (/^health(check)?$/.test(lower)) {
+        await send("Running health check...");
+        const data = await mcp.callToolJson<Record<string, unknown>>("toast_healthcheck");
+        if (!data) { await send(await mcp.callToolText("toast_healthcheck")); return; }
+        const checks = data.checks as Record<string, { status: string; message: string; durationMs?: number }>;
+        let reply = `**Health: ${data.overall}**\n\n`;
+        if (checks) {
+          for (const [name, check] of Object.entries(checks)) {
+            reply += `${check.status === "pass" ? "Pass" : "FAIL"} **${name}**: ${check.message}\n`;
+          }
+        }
+        await send(reply);
+        return;
+      }
+
+      // Orders
+      if (/^orders?/.test(lower)) {
+        await send("Fetching today's orders...");
+        const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+        const rawText = await mcp.callToolText("toast_list_orders", { businessDate: today });
+        await send(rawText.slice(0, 3000));
+        return;
+      }
+
+      // Menus
+      if (/^menus?$/.test(lower)) {
+        const rawText = await mcp.callToolText("toast_get_menu_metadata");
+        await send(rawText.slice(0, 3000));
+        return;
+      }
+
+      // Menu search
+      const searchMatch = lower.match(/^(?:menu search|search)\s+(.+)/);
+      if (searchMatch) {
+        const query = searchMatch[1];
+        await send(`Searching for "${query}"...`);
+        const rawText = await mcp.callToolText("toast_search_menu_items", { query });
+        await send(rawText.slice(0, 3000));
+        return;
+      }
+
+      // Natural language fallback
+      if (prompt) {
+        const memory = getMemory(activity.conversation?.id ?? "default");
+        const response = await prompt.send(text, { messages: memory });
+        await send(response.content ?? "No response. Try a direct command.");
+        return;
+      }
+
+      await send(`Command not recognized: "${text}". Type **help** for commands.`);
+    } catch (err) {
+      logToFile("CHANNEL_ERROR: " + (err as Error).message);
+      await send(`Error: ${(err as Error).message.slice(0, 200)}`);
+    }
+  }
 });
 
 // -- Role resolution cache (per session, not persisted) --
@@ -103,7 +241,8 @@ async function getUserRole(userId: string): Promise<Role> {
 }
 
 // ---- Command: help ----
-app.message(/^(help|\?)$/i, async ({ send }) => {
+app.message(/^(help|\?)$/i, async ({ send, activity }) => {
+  logToFile("HELP handler fired. convType=" + activity.conversation?.conversationType + " from=" + activity.from?.name);
   await send(
     "**Toast Operations Bot**\n\n" +
     "**Commands:**\n" +
@@ -407,6 +546,7 @@ app.on("message", async ({ send, activity }) => {
   // Strip <at>Bot Name</at> tags that Teams injects for @mentions in channels
   const text = raw.replace(/<at[^>]*>.*?<\/at>/gi, "").trim();
   log("Fallback handler. Raw:", JSON.stringify(raw).slice(0, 120), "| Stripped:", text.slice(0, 80));
+  logToFile("FALLBACK: convType=" + activity.conversation?.conversationType + " raw=" + JSON.stringify(raw).slice(0, 150) + " stripped=" + text.slice(0, 80));
 
   if (text.length < 2) {
     await send("Type **help** to see commands, or ask me anything.");
@@ -527,24 +667,6 @@ app.on("message", async ({ send, activity }) => {
 });
 
 // ---- Start ----
-// Diagnostic HTTP server on a separate port so we can check status without auth
-import { createServer } from "node:http";
-const diagPort = parseInt(process.env.DIAG_PORT ?? "3979", 10);
-createServer((req, res) => {
-  res.setHeader("Content-Type", "application/json");
-  if (req.url === "/diag") {
-    res.end(JSON.stringify({
-      status: "running",
-      uptime: process.uptime(),
-      activities: activityLog,
-      channels: getAllChannels(),
-      mcp: mcp.isConnected(),
-    }, null, 2));
-  } else {
-    res.end(JSON.stringify({ status: "running", uptime: process.uptime() }));
-  }
-}).listen(diagPort, () => log("Diag server on port", diagPort));
-
 app.start(config.port).then(() => {
   log("Toast Teams Bot v0.2.0 listening on port", config.port);
   log("AI:", config.openaiModel, "| Timezone:", config.timezone);
