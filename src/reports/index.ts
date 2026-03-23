@@ -1,7 +1,7 @@
 /**
  * Report generators for scheduled posting to Teams channels.
- * Each function pulls data from the MCP server and formats a Teams message.
- * Reports include historical comparisons when cache data is available.
+ * Each report pulls data from the MCP server, runs it through
+ * the intelligence engine, and formats an actionable Teams message.
  */
 
 import { ToastMcpClient } from "../mcp/client.js";
@@ -12,8 +12,70 @@ import {
   getRecentDays,
   type DailySummary,
 } from "../cache/history.js";
+import {
+  analyzeSales,
+  analyzeRush,
+  analyzeDriveThru,
+  analyzeMarketplace,
+  analyzeEndOfDay,
+  generateForecast,
+  type PlatformData,
+} from "../intelligence/insights.js";
 
-/** Format YYYYMMDD for Toast API businessDate param */
+const DEFAULT_TZ = "America/Chicago";
+const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+
+// ---- Timezone-aware date utilities ----
+
+/** Get YYYYMMDD in a given timezone. */
+function businessDateInTz(tz: string, offsetDays = 0): string {
+  const now = new Date();
+  if (offsetDays !== 0) {
+    now.setTime(now.getTime() + offsetDays * 86400000);
+  }
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(now);
+  const y = parts.find((p) => p.type === "year")!.value;
+  const m = parts.find((p) => p.type === "month")!.value;
+  const d = parts.find((p) => p.type === "day")!.value;
+  return `${y}${m}${d}`;
+}
+
+/** Get display date string in a given timezone. */
+function displayDateInTz(tz: string, offsetDays = 0): string {
+  const now = new Date();
+  if (offsetDays !== 0) {
+    now.setTime(now.getTime() + offsetDays * 86400000);
+  }
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+  }).format(now);
+}
+
+/** Get the day of week (0=Sun) in a given timezone. */
+function dayOfWeekInTz(tz: string, offsetDays = 0): number {
+  const now = new Date();
+  if (offsetDays !== 0) {
+    now.setTime(now.getTime() + offsetDays * 86400000);
+  }
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    weekday: "short",
+  }).formatToParts(now);
+  const wd = parts.find((p) => p.type === "weekday")?.value ?? "";
+  const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return map[wd] ?? 0;
+}
+
+/** Format YYYYMMDD for Toast API (legacy, used by shift roster) */
 function businessDate(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -23,40 +85,16 @@ function businessDate(date: Date): string {
 
 /** Get the hour (0..23) of an ISO date string in a given timezone. */
 function getHourInTimezone(isoDate: string, tz: string): number {
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    hour: "numeric",
-    hour12: false,
-  });
-  return parseInt(formatter.format(new Date(isoDate)), 10);
-}
-
-function yesterday(): Date {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
-  return d;
+  return parseInt(
+    new Intl.DateTimeFormat("en-US", { timeZone: tz, hour: "numeric", hour12: false })
+      .format(new Date(isoDate)),
+    10
+  );
 }
 
 function formatDollars(n: number | undefined | null): string {
   if (n == null) return "N/A";
   return `$${n.toFixed(2)}`;
-}
-
-/** Format a comparison: "108 (yesterday: 95, +13.7% up)" */
-function compareNum(current: number, previous: number | undefined, label: string): string {
-  if (previous == null || previous === 0) return "";
-  const pctChange = ((current - previous) / previous) * 100;
-  const direction = pctChange >= 0 ? "up" : "down";
-  const sign = pctChange >= 0 ? "+" : "";
-  return ` (${label}: ${previous}, ${sign}${pctChange.toFixed(1)}% ${direction})`;
-}
-
-function compareDollars(current: number, previous: number | undefined, label: string): string {
-  if (previous == null || previous === 0) return "";
-  const pctChange = ((current - previous) / previous) * 100;
-  const direction = pctChange >= 0 ? "up" : "down";
-  const sign = pctChange >= 0 ? "+" : "";
-  return ` (${label}: ${formatDollars(previous)}, ${sign}${pctChange.toFixed(1)}% ${direction})`;
 }
 
 function formatTime(seconds: number): string {
@@ -65,15 +103,83 @@ function formatTime(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
-const DAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+function pctStr(current: number, previous: number): string {
+  if (previous === 0) return "";
+  const pct = Math.round(((current - previous) / previous) * 100);
+  return `${pct >= 0 ? "+" : ""}${pct}%`;
+}
+
+const DT_NAMES = ["drive thru", "drive-thru", "drivethru", "drive through"];
+
+/** Compute drive-thru stats from raw order data. */
+function computeDriveThru(orders: Array<{
+  diningOptionName?: string;
+  openedDate?: string;
+  closedDate?: string;
+  voided?: boolean;
+  displayNumber?: string;
+  guid?: string;
+}>): { avgSeconds: number; count: number; orderTimes: Array<{ num: string; seconds: number }> } | null {
+  const dtOrders = orders.filter((o) => {
+    if (!o.diningOptionName || !o.openedDate || !o.closedDate || o.voided) return false;
+    return DT_NAMES.some((n) => o.diningOptionName!.toLowerCase().includes(n));
+  });
+  if (dtOrders.length === 0) return null;
+
+  let total = 0;
+  let count = 0;
+  const orderTimes: Array<{ num: string; seconds: number }> = [];
+
+  for (const o of dtOrders) {
+    const sec = Math.round((new Date(o.closedDate!).getTime() - new Date(o.openedDate!).getTime()) / 1000);
+    if (sec > 0 && sec < 3600) {
+      total += sec;
+      count++;
+      orderTimes.push({ num: o.displayNumber ?? o.guid?.slice(0, 8) ?? "?", seconds: sec });
+    }
+  }
+  if (count === 0) return null;
+  return { avgSeconds: Math.round(total / count), count, orderTimes };
+}
+
+// ---- Standard order type used across reports ----
+
+interface OrderData {
+  guid?: string;
+  displayNumber?: string;
+  total?: number;
+  voided?: boolean;
+  openedDate?: string;
+  closedDate?: string;
+  diningOption?: string;
+  diningOptionName?: string;
+  itemCount?: number;
+  serverName?: string;
+  source?: string;
+}
+
+interface OrderResponse {
+  totalOrders?: number;
+  totalSales?: number;
+  detailsFetched?: number;
+  orders?: OrderData[];
+}
+
+// ======================================================================
+// REPORTS
+// ======================================================================
 
 /**
- * Previous day sales summary for #finance with historical comparisons.
+ * Previous day sales summary for #finance.
  */
-export async function dailySalesSummary(mcp: ToastMcpClient): Promise<string> {
-  const date = yesterday();
-  const dateStr = businessDate(date);
-  const display = `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+export async function dailySalesSummary(
+  mcp: ToastMcpClient,
+  timezone = DEFAULT_TZ
+): Promise<string> {
+  const dateStr = businessDateInTz(timezone, -1);
+  const display = displayDateInTz(timezone, -1);
+  const dow = dayOfWeekInTz(timezone, -1);
+  const dayName = DAY_NAMES[dow];
 
   try {
     const raw = await mcp.callToolText("toast_list_orders", {
@@ -81,69 +187,78 @@ export async function dailySalesSummary(mcp: ToastMcpClient): Promise<string> {
       detailCount: 200,
     });
 
-    let data: {
-      totalOrders?: number;
-      totalSales?: number;
-      orders?: Array<{
-        total?: number;
-        voided?: boolean;
-        diningOption?: string;
-        openedDate?: string;
-        closedDate?: string;
-        diningOptionName?: string;
-      }>;
-    } | null = null;
-    try { data = JSON.parse(raw); } catch { /* plain text */ }
+    let data: OrderResponse | null = null;
+    try { data = JSON.parse(raw); } catch { /* */ }
 
     if (!data || !data.totalOrders) {
       return `**Daily Sales Summary** (${display})\n\nNo order data available for yesterday.`;
     }
 
-    const validOrders = data.orders?.filter((o) => !o.voided) ?? [];
-    const voidCount = data.orders?.filter((o) => o.voided).length ?? 0;
-    const avgOrder =
-      validOrders.length > 0 && data.totalSales
-        ? data.totalSales / validOrders.length
-        : 0;
-    const voidPct = data.totalOrders > 0 ? ((voidCount / data.totalOrders) * 100).toFixed(1) : "0";
+    const orders = data.orders ?? [];
+    const validOrders = orders.filter((o) => !o.voided);
+    const voidCount = orders.filter((o) => o.voided).length;
+    const totalSales = data.totalSales ?? 0;
+    const avgOrder = validOrders.length > 0 ? totalSales / validOrders.length : 0;
 
-    // Historical comparisons
-    const twoDaysAgo = getYesterday(dateStr);
+    // Historical context
+    const prev = getYesterday(dateStr);
     const lastWeek = getSameDayLastWeek(dateStr);
+    const dowAvg = getDayOfWeekAverage(dateStr);
 
-    let text = `**Daily Sales Summary** (${display})\n\n`;
-    text += `Total Orders: **${data.totalOrders}**${compareNum(data.totalOrders, twoDaysAgo?.totalOrders, "prev day")}\n`;
-    text += `Total Sales: **${formatDollars(data.totalSales)}**${compareDollars(data.totalSales!, twoDaysAgo?.totalSales, "prev day")}\n`;
-    text += `Average Order: **${formatDollars(avgOrder)}**\n`;
-    text += `Voided: ${voidCount} (${voidPct}%)\n`;
+    // --- Build report ---
+    let text = `**Daily Sales Summary** (${dayName}, ${display})\n\n`;
 
-    if (lastWeek) {
-      const orderPct = lastWeek.totalOrders > 0
-        ? (((data.totalOrders - lastWeek.totalOrders) / lastWeek.totalOrders) * 100).toFixed(0)
-        : "N/A";
-      const salesPct = lastWeek.totalSales > 0
-        ? (((data.totalSales! - lastWeek.totalSales) / lastWeek.totalSales) * 100).toFixed(0)
-        : "N/A";
-      text += `\nvs. Same Day Last Week: Orders ${orderPct}%, Sales ${salesPct}%`;
+    // Core numbers with comparisons
+    text += `**Revenue**: ${formatDollars(totalSales)}`;
+    if (prev) text += ` (prev day: ${formatDollars(prev.totalSales)}, ${pctStr(totalSales, prev.totalSales)})`;
+    text += `\n`;
+
+    text += `**Orders**: ${data.totalOrders}`;
+    if (prev) text += ` (prev day: ${prev.totalOrders}, ${pctStr(data.totalOrders, prev.totalOrders)})`;
+    text += `\n`;
+
+    text += `**Average Ticket**: ${formatDollars(avgOrder)}\n`;
+
+    if (voidCount > 0) {
+      const voidPct = ((voidCount / data.totalOrders) * 100).toFixed(1);
+      text += `**Voided**: ${voidCount} (${voidPct}%)\n`;
     }
 
-    // Drive-thru speed for yesterday
-    const DT_NAMES = ["drive thru", "drive-thru", "drivethru", "drive through"];
-    const dtOrders = (data.orders ?? []).filter((o) => {
-      if (!o.diningOptionName || !o.openedDate || !o.closedDate || o.voided) return false;
-      return DT_NAMES.some((n) => o.diningOptionName!.toLowerCase().includes(n));
+    if (lastWeek) {
+      text += `**vs Last ${dayName}**: Orders ${pctStr(data.totalOrders, lastWeek.totalOrders)}, Sales ${pctStr(totalSales, lastWeek.totalSales)}\n`;
+    }
+
+    // Drive-thru
+    const dt = computeDriveThru(orders);
+    if (dt) {
+      const status = dt.avgSeconds <= 90 ? "ON TARGET" : `**${dt.avgSeconds - 90}s OVER**`;
+      text += `\n**Drive-Thru**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders (target: 1:30) ${status}\n`;
+    }
+
+    // Intelligence layer
+    const insights = analyzeSales({
+      totalOrders: data.totalOrders,
+      totalSales,
+      avgOrder,
+      voidCount,
+      yesterday: prev,
+      lastWeek,
+      dowAvg,
+      dayOfWeek: dow,
     });
-    if (dtOrders.length > 0) {
-      let dtTotal = 0;
-      let dtCount = 0;
-      for (const o of dtOrders) {
-        const sec = Math.round((new Date(o.closedDate!).getTime() - new Date(o.openedDate!).getTime()) / 1000);
-        if (sec > 0 && sec < 3600) { dtTotal += sec; dtCount++; }
-      }
-      if (dtCount > 0) {
-        const avgSec = Math.round(dtTotal / dtCount);
-        const status = avgSec <= 90 ? "ON TARGET" : `**${avgSec - 90}s OVER**`;
-        text += `\n\n**Drive-Thru**: avg **${formatTime(avgSec)}** across ${dtCount} orders (target: 1:30) ${status}`;
+
+    if (dt) {
+      insights.push(...analyzeDriveThru({
+        avgSeconds: dt.avgSeconds,
+        count: dt.count,
+        yesterdayAvg: prev?.driveThru?.avgSeconds,
+      }));
+    }
+
+    if (insights.length > 0) {
+      text += `\n**What This Means**:\n`;
+      for (const insight of insights) {
+        text += `${insight}\n`;
       }
     }
 
@@ -154,21 +269,18 @@ export async function dailySalesSummary(mcp: ToastMcpClient): Promise<string> {
 }
 
 /**
- * Marketplace breakdown (DoorDash, Uber Eats, Grubhub) for #marketplace.
+ * Marketplace breakdown for #marketplace.
  */
-export async function marketplaceBreakdown(mcp: ToastMcpClient): Promise<string> {
-  const date = yesterday();
-  const dateStr = businessDate(date);
-  const display = `${date.getMonth() + 1}/${date.getDate()}/${date.getFullYear()}`;
+export async function marketplaceBreakdown(
+  mcp: ToastMcpClient,
+  timezone = DEFAULT_TZ
+): Promise<string> {
+  const dateStr = businessDateInTz(timezone, -1);
+  const display = displayDateInTz(timezone, -1);
 
   const PLATFORMS: Record<string, string[]> = {
     DoorDash: ["DoorDash", "DoorDash Delivery", "DoorDash Takeout"],
-    "Uber Eats": [
-      "Uber Eats Delivery",
-      "Uber Eats Takeout",
-      "UberEats",
-      "UberEats Delivery",
-    ],
+    "Uber Eats": ["Uber Eats Delivery", "Uber Eats Takeout", "UberEats", "UberEats Delivery"],
     Grubhub: ["Grubhub", "Grubhub Delivery"],
   };
 
@@ -178,28 +290,19 @@ export async function marketplaceBreakdown(mcp: ToastMcpClient): Promise<string>
       detailCount: 200,
     });
 
-    let data: {
-      totalOrders?: number;
-      totalSales?: number;
-      orders?: Array<{
-        total?: number;
-        voided?: boolean;
-        diningOption?: string;
-        diningOptionName?: string;
-      }>;
-    } | null = null;
-    try { data = JSON.parse(raw); } catch { /* plain text */ }
+    let data: OrderResponse | null = null;
+    try { data = JSON.parse(raw); } catch { /* */ }
 
     if (!data || !data.orders) {
       return `**Marketplace Breakdown** (${display})\n\nNo order data available.`;
     }
 
     const validOrders = data.orders.filter((o) => !o.voided);
+    const lastWeek = getSameDayLastWeek(dateStr);
+    const lastWeekPlats = lastWeek?.platformBreakdown ?? [];
 
     // Group orders by platform
     const platformTotals: Record<string, { orders: number; sales: number }> = {};
-    let inHouseOrders = 0;
-    let inHouseSales = 0;
 
     for (const order of validOrders) {
       const optionName = order.diningOptionName ?? order.diningOption ?? "";
@@ -207,9 +310,7 @@ export async function marketplaceBreakdown(mcp: ToastMcpClient): Promise<string>
 
       for (const [platform, names] of Object.entries(PLATFORMS)) {
         if (names.some((n) => optionName.includes(n))) {
-          if (!platformTotals[platform]) {
-            platformTotals[platform] = { orders: 0, sales: 0 };
-          }
+          if (!platformTotals[platform]) platformTotals[platform] = { orders: 0, sales: 0 };
           platformTotals[platform].orders++;
           platformTotals[platform].sales += order.total ?? 0;
           matched = true;
@@ -218,25 +319,48 @@ export async function marketplaceBreakdown(mcp: ToastMcpClient): Promise<string>
       }
 
       if (!matched) {
-        inHouseOrders++;
-        inHouseSales += order.total ?? 0;
+        // Check for drive-thru
+        if (DT_NAMES.some((n) => optionName.toLowerCase().includes(n))) {
+          if (!platformTotals["Drive Thru"]) platformTotals["Drive Thru"] = { orders: 0, sales: 0 };
+          platformTotals["Drive Thru"].orders++;
+          platformTotals["Drive Thru"].sales += order.total ?? 0;
+        } else {
+          if (!platformTotals["In House"]) platformTotals["In House"] = { orders: 0, sales: 0 };
+          platformTotals["In House"].orders++;
+          platformTotals["In House"].sales += order.total ?? 0;
+        }
       }
     }
 
-    // Historical comparison for platform breakdown
-    const lastWeek = getSameDayLastWeek(dateStr);
-    const lastWeekPlats = lastWeek?.platformBreakdown ?? [];
-
     let text = `**Marketplace Breakdown** (${display})\n\n`;
+
+    const platformDataList: PlatformData[] = [];
 
     for (const [platform, totals] of Object.entries(platformTotals)) {
       const lwMatch = lastWeekPlats.find((p) => p.platform === platform);
-      const comp = lwMatch ? compareNum(totals.orders, lwMatch.orders, "last wk") : "";
+      let comp = "";
+      if (lwMatch && lwMatch.orders > 0) {
+        comp = ` (last wk: ${lwMatch.orders}, ${pctStr(totals.orders, lwMatch.orders)})`;
+      }
       text += `**${platform}**: ${totals.orders} orders, ${formatDollars(totals.sales)}${comp}\n`;
+      platformDataList.push({
+        platform,
+        orders: totals.orders,
+        sales: totals.sales,
+        lastWeekOrders: lwMatch?.orders,
+      });
     }
 
-    text += `**In House**: ${inHouseOrders} orders, ${formatDollars(inHouseSales)}\n`;
-    text += `\nTotal: **${validOrders.length}** orders, **${formatDollars(data.totalSales)}**`;
+    text += `\n**Total**: ${validOrders.length} orders, ${formatDollars(data.totalSales)}\n`;
+
+    // Intelligence
+    const insights = analyzeMarketplace(platformDataList, validOrders.length);
+    if (insights.length > 0) {
+      text += `\n**What This Means**:\n`;
+      for (const insight of insights) {
+        text += `${insight}\n`;
+      }
+    }
 
     return text;
   } catch (err) {
@@ -245,18 +369,17 @@ export async function marketplaceBreakdown(mcp: ToastMcpClient): Promise<string>
 }
 
 /**
- * Rush recap: orders within a time window for today, with comparisons.
+ * Rush recap with peak window analysis and actionable insights.
  */
 export async function rushRecap(
   mcp: ToastMcpClient,
   label: string,
   startHour: number,
   endHour: number,
-  timezone = "America/Chicago"
+  timezone = DEFAULT_TZ
 ): Promise<string> {
-  const today = new Date();
-  const dateStr = businessDate(today);
-  const display = `${today.getMonth() + 1}/${today.getDate()}/${today.getFullYear()}`;
+  const dateStr = businessDateInTz(timezone);
+  const display = displayDateInTz(timezone);
 
   try {
     const raw = await mcp.callToolText("toast_list_orders", {
@@ -264,20 +387,8 @@ export async function rushRecap(
       detailCount: 200,
     });
 
-    let data: {
-      totalOrders?: number;
-      totalSales?: number;
-      orders?: Array<{
-        total?: number;
-        voided?: boolean;
-        openedDate?: string;
-        closedDate?: string;
-        diningOptionName?: string;
-        displayNumber?: string;
-        guid?: string;
-      }>;
-    } | null = null;
-    try { data = JSON.parse(raw); } catch { /* plain text */ }
+    let data: OrderResponse | null = null;
+    try { data = JSON.parse(raw); } catch { /* */ }
 
     if (!data || !data.orders) {
       return `**${label}** (${display})\n\nNo order data available.`;
@@ -290,35 +401,28 @@ export async function rushRecap(
       return hour >= startHour && hour < endHour;
     });
 
-    const windowSales = windowOrders.reduce(
-      (sum, o) => sum + (o.total ?? 0),
-      0
-    );
+    const windowSales = windowOrders.reduce((sum, o) => sum + (o.total ?? 0), 0);
 
     // Compare to yesterday's same window from history
     const ySummary = getYesterday(dateStr);
     let yWindowOrders: number | undefined;
     let yWindowSales: number | undefined;
     if (ySummary) {
-      const yHours = ySummary.ordersByHour.filter(
-        (h) => h.hour >= startHour && h.hour < endHour
-      );
+      const yHours = ySummary.ordersByHour.filter((h) => h.hour >= startHour && h.hour < endHour);
       yWindowOrders = yHours.reduce((s, h) => s + h.orders, 0);
       yWindowSales = yHours.reduce((s, h) => s + h.sales, 0);
     }
 
-    // Find peak 15-min window (group by quarter-hour)
+    // Find peak 15-min window
     const quarterMap = new Map<string, number>();
     for (const o of windowOrders) {
       if (!o.openedDate) continue;
-      const d = new Date(o.openedDate);
-      const hourFormatter = new Intl.DateTimeFormat("en-US", {
+      const parts = new Intl.DateTimeFormat("en-US", {
         timeZone: timezone,
         hour: "numeric",
         minute: "numeric",
         hour12: false,
-      });
-      const parts = hourFormatter.formatToParts(d);
+      }).formatToParts(new Date(o.openedDate));
       const h = parseInt(parts.find((p) => p.type === "hour")?.value ?? "0", 10);
       const min = parseInt(parts.find((p) => p.type === "minute")?.value ?? "0", 10);
       const q = Math.floor(min / 15) * 15;
@@ -329,60 +433,69 @@ export async function rushRecap(
     let peakWindow = "";
     let peakCount = 0;
     for (const [key, count] of quarterMap) {
-      if (count > peakCount) {
-        peakCount = count;
-        peakWindow = key;
-      }
+      if (count > peakCount) { peakCount = count; peakWindow = key; }
     }
 
-    let text = `**${label}** (${display})\n\n`;
-    text += `Orders: **${windowOrders.length}**${compareNum(windowOrders.length, yWindowOrders, "yesterday")}\n`;
-    text += `Sales: **${formatDollars(windowSales)}**${compareDollars(windowSales, yWindowSales, "yesterday")}\n`;
-
-    if (windowOrders.length > 0) {
-      const avg = windowSales / windowOrders.length;
-      text += `Average: **${formatDollars(avg)}**\n`;
-    }
-
+    // Format peak window end time
+    let peakWindowDisplay = "";
     if (peakWindow && peakCount > 0) {
-      // Calculate end of peak window
       const [ph, pm] = peakWindow.split(":").map(Number);
       const endMin = pm + 15;
       const endH = endMin >= 60 ? ph + 1 : ph;
       const endM = endMin >= 60 ? endMin - 60 : endMin;
-      text += `Peak Window: ${peakWindow} to ${endH}:${String(endM).padStart(2, "0")} (${peakCount} orders)\n`;
+      peakWindowDisplay = `${peakWindow} to ${endH}:${String(endM).padStart(2, "0")}`;
     }
 
-    // Drive-thru speed section (uses ALL orders for the day, not just the rush window)
-    const DT_NAMES = ["drive thru", "drive-thru", "drivethru", "drive through"];
-    const dtOrders = (data.orders ?? []).filter((o) => {
-      if (!o.diningOptionName || !o.openedDate || !o.closedDate || o.voided) return false;
-      return DT_NAMES.some((n) => o.diningOptionName!.toLowerCase().includes(n));
+    // --- Build report ---
+    let text = `**${label}** (${display})\n\n`;
+
+    text += `**Orders**: ${windowOrders.length}`;
+    if (yWindowOrders != null) text += ` (yesterday: ${yWindowOrders}, ${pctStr(windowOrders.length, yWindowOrders)})`;
+    text += `\n`;
+
+    text += `**Sales**: ${formatDollars(windowSales)}`;
+    if (yWindowSales != null) text += ` (yesterday: ${formatDollars(yWindowSales)}, ${pctStr(windowSales, yWindowSales)})`;
+    text += `\n`;
+
+    if (windowOrders.length > 0) {
+      text += `**Average**: ${formatDollars(windowSales / windowOrders.length)}\n`;
+    }
+
+    if (peakWindowDisplay) {
+      text += `**Peak**: ${peakWindowDisplay} (${peakCount} orders)\n`;
+    }
+
+    // Drive-thru section (all day, not just rush window)
+    const dt = computeDriveThru(data.orders);
+    if (dt) {
+      const status = dt.avgSeconds <= 90 ? "ON TARGET" : `**${dt.avgSeconds - 90}s OVER**`;
+      text += `\n**Drive-Thru Today**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders ${status}\n`;
+      text += `**Every order through in 1:30. That's the standard.**\n`;
+    }
+
+    // Intelligence
+    const rushInsights = analyzeRush({
+      label,
+      orders: windowOrders.length,
+      sales: windowSales,
+      peakWindow: peakWindowDisplay,
+      peakCount,
+      yesterdayOrders: yWindowOrders,
+      yesterdaySales: yWindowSales,
     });
 
-    if (dtOrders.length > 0) {
-      let dtTotal = 0;
-      let dtCount = 0;
-      for (const o of dtOrders) {
-        const sec = Math.round(
-          (new Date(o.closedDate!).getTime() - new Date(o.openedDate!).getTime()) / 1000
-        );
-        if (sec > 0 && sec < 3600) {
-          dtTotal += sec;
-          dtCount++;
-        }
-      }
-      if (dtCount > 0) {
-        const avgSec = Math.round(dtTotal / dtCount);
-        const status = avgSec <= 90 ? "ON TARGET" : `**${avgSec - 90}s OVER**`;
-        // Compare to yesterday's drive-thru if available
-        let dtComp = "";
-        if (ySummary?.driveThru) {
-          const diff = avgSec - ySummary.driveThru.avgSeconds;
-          const direction = diff <= 0 ? "faster" : "slower";
-          dtComp = ` (yesterday: ${formatTime(ySummary.driveThru.avgSeconds)}, ${Math.abs(diff)}s ${direction})`;
-        }
-        text += `\n**Drive-Thru**: avg **${formatTime(avgSec)}** across ${dtCount} orders (target: 1:30) ${status}${dtComp}`;
+    if (dt) {
+      rushInsights.push(...analyzeDriveThru({
+        avgSeconds: dt.avgSeconds,
+        count: dt.count,
+        yesterdayAvg: ySummary?.driveThru?.avgSeconds,
+      }));
+    }
+
+    if (rushInsights.length > 0) {
+      text += `\n**What This Means**:\n`;
+      for (const insight of rushInsights) {
+        text += `${insight}\n`;
       }
     }
 
@@ -393,7 +506,7 @@ export async function rushRecap(
 }
 
 /**
- * End of Day Summary: comprehensive day-in-review for #finance and #ops at 6:30 PM.
+ * End of Day Summary with full analysis and tomorrow forecast.
  */
 export async function endOfDaySummary(
   _mcp: ToastMcpClient,
@@ -413,101 +526,88 @@ export async function endOfDaySummary(
   const lastWeek = getSameDayLastWeek(dateStr);
   const dowAvg = getDayOfWeekAverage(dateStr);
 
-  const voidPct = todaySummary.totalOrders > 0
-    ? ((todaySummary.voidCount / todaySummary.totalOrders) * 100).toFixed(1)
-    : "0";
-
+  // --- Build report ---
   let text = `**End of Day Summary** (${dayName}, ${display})\n\n`;
 
-  // Revenue and orders
-  text += `**Revenue**: ${formatDollars(todaySummary.totalSales)}${compareDollars(todaySummary.totalSales, prev?.totalSales, "yesterday")}\n`;
-  text += `**Orders**: ${todaySummary.totalOrders}${compareNum(todaySummary.totalOrders, prev?.totalOrders, "yesterday")}\n`;
-  text += `**Average Order**: ${formatDollars(todaySummary.averageOrderValue)}\n`;
-  text += `**Voided**: ${todaySummary.voidCount} (${voidPct}%)\n`;
+  // Core numbers
+  text += `**Revenue**: ${formatDollars(todaySummary.totalSales)}`;
+  if (prev) text += ` (yesterday: ${formatDollars(prev.totalSales)}, ${pctStr(todaySummary.totalSales, prev.totalSales)})`;
+  text += `\n`;
 
-  // Week-over-week
-  if (lastWeek) {
-    const orderPct = lastWeek.totalOrders > 0
-      ? `${(((todaySummary.totalOrders - lastWeek.totalOrders) / lastWeek.totalOrders) * 100).toFixed(0)}%`
-      : "N/A";
-    const salesPct = lastWeek.totalSales > 0
-      ? `${(((todaySummary.totalSales - lastWeek.totalSales) / lastWeek.totalSales) * 100).toFixed(0)}%`
-      : "N/A";
-    text += `\nvs. Last ${dayName}: Orders ${orderPct}, Sales ${salesPct}\n`;
+  text += `**Orders**: ${todaySummary.totalOrders}`;
+  if (prev) text += ` (yesterday: ${prev.totalOrders}, ${pctStr(todaySummary.totalOrders, prev.totalOrders)})`;
+  text += `\n`;
+
+  text += `**Average Ticket**: ${formatDollars(todaySummary.averageOrderValue)}\n`;
+
+  if (todaySummary.voidCount > 0) {
+    const voidPct = ((todaySummary.voidCount / todaySummary.totalOrders) * 100).toFixed(1);
+    text += `**Voided**: ${todaySummary.voidCount} (${voidPct}%)\n`;
   }
 
-  // Day-of-week average
+  if (lastWeek) {
+    text += `**vs Last ${dayName}**: Orders ${pctStr(todaySummary.totalOrders, lastWeek.totalOrders)}, Sales ${pctStr(todaySummary.totalSales, lastWeek.totalSales)}\n`;
+  }
+
   if (dowAvg) {
-    const orderDiff = todaySummary.totalOrders - dowAvg.avgOrders;
-    const salesDiff = todaySummary.totalSales - dowAvg.avgSales;
-    text += `vs. ${dayName} Average: Orders ${orderDiff >= 0 ? "+" : ""}${orderDiff}, Sales ${salesDiff >= 0 ? "+" : ""}${formatDollars(salesDiff)}\n`;
+    text += `**vs ${dayName} Avg**: Orders ${pctStr(todaySummary.totalOrders, dowAvg.avgOrders)}, Sales ${pctStr(todaySummary.totalSales, dowAvg.avgSales)}\n`;
   }
 
   // Platform breakdown
   if (todaySummary.platformBreakdown.length > 0) {
     text += `\n**By Channel**:\n`;
     for (const p of todaySummary.platformBreakdown) {
-      const lwMatch = lastWeek?.platformBreakdown.find((lp) => lp.platform === p.platform);
-      const comp = lwMatch ? compareNum(p.orders, lwMatch.orders, "last wk") : "";
-      text += `${p.platform}: ${p.orders} orders, ${formatDollars(p.sales)}${comp}\n`;
+      text += `${p.platform}: ${p.orders} orders, ${formatDollars(p.sales)}\n`;
     }
   }
 
   // Peak hour
   if (todaySummary.peakHourOrders > 0) {
-    const endHour = todaySummary.peakHour + 1;
-    text += `\n**Peak Hour**: ${todaySummary.peakHour}:00 to ${endHour}:00 (${todaySummary.peakHourOrders} orders)\n`;
+    text += `\n**Peak Hour**: ${todaySummary.peakHour}:00 to ${todaySummary.peakHour + 1}:00 (${todaySummary.peakHourOrders} orders)\n`;
   }
 
   // Drive-thru
   if (todaySummary.driveThru) {
     const dt = todaySummary.driveThru;
     const status = dt.avgSeconds <= 90 ? "ON TARGET" : `**${dt.avgSeconds - 90}s OVER**`;
-    let dtComp = "";
-    if (prev?.driveThru) {
-      const diff = dt.avgSeconds - prev.driveThru.avgSeconds;
-      const direction = diff <= 0 ? "faster" : "slower";
-      dtComp = ` (yesterday: ${formatTime(prev.driveThru.avgSeconds)}, ${Math.abs(diff)}s ${direction})`;
-    }
-    text += `\n**Drive-Thru**: avg **${formatTime(dt.avgSeconds)}** across ${dt.count} orders (target: 1:30) ${status}${dtComp}`;
-    text += `\n**Every order through in 1:30. That's the standard.**`;
+    text += `\n**Drive-Thru**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders ${status}\n`;
+    text += `**Every order through in 1:30. That's the standard.**\n`;
   }
 
-  // Tomorrow forecast based on day-of-week history
-  const tomorrow = new Date(d);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowDow = tomorrow.getDay();
-  const tomorrowName = DAY_NAMES[tomorrowDow];
+  // Intelligence layer
+  const insights = analyzeEndOfDay({
+    summary: todaySummary,
+    yesterday: prev,
+    lastWeek,
+    dowAvg,
+  });
 
-  // Look for same day-of-week in recent history
+  // Tomorrow forecast
+  const tomorrowDow = (d.getDay() + 1) % 7;
   const recent = getRecentDays(dateStr, 28);
   const tomorrowMatches = recent.filter((r) => r.dayOfWeek === tomorrowDow);
-  if (tomorrowMatches.length > 0) {
-    const avgOrders = Math.round(
-      tomorrowMatches.reduce((s, r) => s + r.totalOrders, 0) / tomorrowMatches.length
-    );
-    const avgSales = Math.round(
-      tomorrowMatches.reduce((s, r) => s + r.totalSales, 0) / tomorrowMatches.length * 100
-    ) / 100;
-    text += `\n\n**Tomorrow Forecast** (${tomorrowName}, based on ${tomorrowMatches.length} week avg): ~${avgOrders} orders, ~${formatDollars(avgSales)}`;
+  const forecastInsights = generateForecast(tomorrowDow, tomorrowMatches);
+  insights.push(...forecastInsights);
+
+  if (insights.length > 0) {
+    text += `\n**What This Means**:\n`;
+    for (const insight of insights) {
+      text += `${insight}\n`;
+    }
   }
 
   return text;
 }
 
 /**
- * Shift roster: who's working today. Requires labor tools on MCP server.
- * Currently a placeholder until toast_list_shifts is added.
+ * Shift roster (placeholder until toast_list_shifts is added).
  */
 export async function shiftRoster(mcp: ToastMcpClient): Promise<string> {
   const today = new Date();
   const display = `${today.getMonth() + 1}/${today.getDate()}/${today.getFullYear()}`;
 
-  // Check if labor tool exists
   const tools = mcp.getTools();
-  const hasLabor = tools.some(
-    (t) => t.name.includes("labor") || t.name.includes("shift")
-  );
+  const hasLabor = tools.some((t) => t.name.includes("labor") || t.name.includes("shift"));
 
   if (!hasLabor) {
     return (
@@ -518,9 +618,7 @@ export async function shiftRoster(mcp: ToastMcpClient): Promise<string> {
   }
 
   try {
-    const raw = await mcp.callToolText("toast_list_shifts", {
-      businessDate: businessDate(today),
-    });
+    const raw = await mcp.callToolText("toast_list_shifts", { businessDate: businessDate(today) });
     return `**Shift Roster** (${display})\n\n${raw}`;
   } catch (err) {
     return `**Shift Roster** (${display})\n\nFailed: ${(err as Error).message}`;
@@ -528,17 +626,14 @@ export async function shiftRoster(mcp: ToastMcpClient): Promise<string> {
 }
 
 /**
- * 86'd item check: polls stock endpoint for out of stock items.
- * Requires toast_get_stock tool on MCP server.
+ * 86'd item check.
  */
 export async function check86d(
   mcp: ToastMcpClient,
   previous86d: Set<string>
 ): Promise<{ message: string | null; current86d: Set<string> }> {
   const tools = mcp.getTools();
-  const hasStock = tools.some(
-    (t) => t.name.includes("stock") || t.name.includes("inventory")
-  );
+  const hasStock = tools.some((t) => t.name.includes("stock") || t.name.includes("inventory"));
 
   if (!hasStock) {
     return { message: null, current86d: previous86d };
@@ -546,28 +641,16 @@ export async function check86d(
 
   try {
     const raw = await mcp.callToolText("toast_get_stock");
-    let data: {
-      items?: Array<{
-        name: string;
-        guid: string;
-        quantity?: number;
-        status?: string;
-      }>;
-    } | null = null;
-    try { data = JSON.parse(raw); } catch { /* plain text */ }
+    let data: { items?: Array<{ name: string; guid: string; quantity?: number; status?: string }> } | null = null;
+    try { data = JSON.parse(raw); } catch { /* */ }
 
-    if (!data?.items) {
-      return { message: null, current86d: previous86d };
-    }
+    if (!data?.items) return { message: null, current86d: previous86d };
 
     const current86d = new Set<string>();
     const newly86d: string[] = [];
 
     for (const item of data.items) {
-      if (
-        item.status === "OUT_OF_STOCK" ||
-        (item.quantity != null && item.quantity <= 0)
-      ) {
+      if (item.status === "OUT_OF_STOCK" || (item.quantity != null && item.quantity <= 0)) {
         current86d.add(item.guid);
         if (!previous86d.has(item.guid)) {
           newly86d.push(item.name);
@@ -575,14 +658,13 @@ export async function check86d(
       }
     }
 
-    if (newly86d.length === 0) {
-      return { message: null, current86d };
-    }
+    if (newly86d.length === 0) return { message: null, current86d };
 
     const text =
       `**86'd Alert**\n\n` +
       `The following items are now out of stock:\n` +
-      newly86d.map((name) => `**${name}**`).join("\n");
+      newly86d.map((name) => `**${name}**`).join("\n") +
+      `\n\nUpdate the POS and let the team know so they stop promising these to customers.`;
 
     return { message: text, current86d };
   } catch {

@@ -14,6 +14,18 @@ import {
 import { pollAlerts, resetAlertState } from "./alerts/monitor.js";
 import { buildDailySummary, saveSummary } from "./cache/history.js";
 
+/** Get today's YYYYMMDD in the configured timezone (not UTC). */
+function todayDateStr(tz: string): string {
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  });
+  const parts = formatter.formatToParts(new Date());
+  return `${parts.find((p) => p.type === "year")!.value}${parts.find((p) => p.type === "month")!.value}${parts.find((p) => p.type === "day")!.value}`;
+}
+
 // Write activity log to persistent file on Azure for debugging
 const LOG_FILE = "/home/LogFiles/bot-activity.log";
 function logToFile(msg: string) {
@@ -182,10 +194,10 @@ app.on("activity", async ({ activity, send, next }) => {
         await send(`Running **${report}** report...`);
         try {
           if (report === "sales" || report === "all") {
-            await send(await dailySalesSummary(mcp));
+            await send(await dailySalesSummary(mcp, config.timezone));
           }
           if (report === "marketplace" || report === "all") {
-            await send(await marketplaceBreakdown(mcp));
+            await send(await marketplaceBreakdown(mcp, config.timezone));
           }
           if (report === "morning" || report === "all") {
             await send(await rushRecap(mcp, "Morning Rush Recap", 6, 10, config.timezone));
@@ -215,15 +227,14 @@ app.on("activity", async ({ activity, send, next }) => {
             }
           }
           if (report === "drivethru" || report === "all") {
-            // Show drive-thru speed stats even if no alert fires
-            const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+            const dateStr = todayDateStr(config.timezone);
             const raw = await mcp.callToolText("toast_list_orders", { businessDate: dateStr, detailCount: 200 });
             let data: { orders?: Array<{ diningOptionName?: string; openedDate?: string; closedDate?: string; voided?: boolean; displayNumber?: string; guid?: string }> } | null = null;
             try { data = JSON.parse(raw); } catch { /* text */ }
-            const DT_NAMES = ["drive thru", "drive-thru", "drivethru", "drive through"];
+            const DT = ["drive thru", "drive-thru", "drivethru", "drive through"];
             const dtOrders = (data?.orders ?? []).filter((o) => {
               if (!o.diningOptionName || !o.openedDate || !o.closedDate || o.voided) return false;
-              return DT_NAMES.some((n) => o.diningOptionName!.toLowerCase().includes(n));
+              return DT.some((n) => o.diningOptionName!.toLowerCase().includes(n));
             });
             if (dtOrders.length === 0) {
               await send("**Drive-Thru Speed**: No completed drive-thru orders today.");
@@ -257,7 +268,7 @@ app.on("activity", async ({ activity, send, next }) => {
             }
           }
           if (report === "eod" || report === "all") {
-            const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+            const dateStr = todayDateStr(config.timezone);
             await send("Building end of day summary...");
             const summary = await buildDailySummary(mcp, dateStr, config.timezone);
             saveSummary(summary);
@@ -295,7 +306,7 @@ app.on("activity", async ({ activity, send, next }) => {
       // Orders
       if (/^orders?/.test(lower)) {
         await send("Fetching today's orders...");
-        const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+        const today = todayDateStr(config.timezone);
         const rawText = await mcp.callToolText("toast_list_orders", { businessDate: today });
         await send(rawText.slice(0, 3000));
         return;
@@ -484,7 +495,7 @@ app.message(/^orders?(\s+today)?$/i, async ({ send, activity }) => {
 
   await send("Fetching today's orders...");
   try {
-    const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const today = todayDateStr(config.timezone);
     const rawText = await mcp.callToolText("toast_list_orders", { businessDate: today });
 
     let data: {

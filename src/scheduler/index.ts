@@ -85,7 +85,7 @@ export function startScheduler(
   cron.schedule(
     "0 6 * * *",
     async () => {
-      const report = await dailySalesSummary(mcp);
+      const report = await dailySalesSummary(mcp, timezone);
       await sendToChannel(app, CHANNEL_NAMES.FINANCE, report);
     },
     opts
@@ -105,7 +105,7 @@ export function startScheduler(
   cron.schedule(
     "0 7 * * *",
     async () => {
-      const report = await marketplaceBreakdown(mcp);
+      const report = await marketplaceBreakdown(mcp, timezone);
       await sendToChannel(app, CHANNEL_NAMES.MARKETING, report);
     },
     opts
