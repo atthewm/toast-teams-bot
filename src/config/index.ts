@@ -38,6 +38,19 @@ export interface BotConfig {
   largeOrderItems: number;
   highVoidCount: number;
   longOpenMinutes: number;
+  // Intelligence thresholds
+  dtOutlierMultiplier: number;
+  dtTrendThreshold: number;
+  slowPeriodThreshold: number;
+  platformDroughtMinutes: number;
+  revenuePacingThreshold: number;
+  voidClusterCount: number;
+  voidClusterWindow: number;
+  rushEntryMultiplier: number;
+  rushExitMultiplier: number;
+  hourlyPulseDeviation: number;
+  shiftPerfMinOrders: number;
+  rollingWindowMinutes: number;
 }
 
 export function loadConfig(): BotConfig {
@@ -83,5 +96,17 @@ export function loadConfig(): BotConfig {
     largeOrderItems: parseInt(env.LARGE_ORDER_ITEMS ?? "10", 10),
     highVoidCount: parseInt(env.HIGH_VOID_COUNT ?? "3", 10),
     longOpenMinutes: parseInt(env.LONG_OPEN_MINUTES ?? "30", 10),
+    dtOutlierMultiplier: parseFloat(env.DT_OUTLIER_MULTIPLIER ?? "2.0"),
+    dtTrendThreshold: parseFloat(env.DT_TREND_THRESHOLD ?? "0.20"),
+    slowPeriodThreshold: parseFloat(env.SLOW_PERIOD_THRESHOLD ?? "0.50"),
+    platformDroughtMinutes: parseInt(env.PLATFORM_DROUGHT_MINUTES ?? "45", 10),
+    revenuePacingThreshold: parseFloat(env.REVENUE_PACING_THRESHOLD ?? "0.20"),
+    voidClusterCount: parseInt(env.VOID_CLUSTER_COUNT ?? "3", 10),
+    voidClusterWindow: parseInt(env.VOID_CLUSTER_WINDOW ?? "7", 10),
+    rushEntryMultiplier: parseFloat(env.RUSH_ENTRY_MULTIPLIER ?? "1.5"),
+    rushExitMultiplier: parseFloat(env.RUSH_EXIT_MULTIPLIER ?? "1.0"),
+    hourlyPulseDeviation: parseFloat(env.HOURLY_PULSE_DEVIATION ?? "0.15"),
+    shiftPerfMinOrders: parseInt(env.SHIFT_PERF_MIN_ORDERS ?? "5", 10),
+    rollingWindowMinutes: parseInt(env.ROLLING_WINDOW_MINUTES ?? "30", 10),
   };
 }

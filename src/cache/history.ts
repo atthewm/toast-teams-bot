@@ -132,6 +132,11 @@ export function getRecentDays(todayStr: string, count: number): DailySummary[] {
   return results;
 }
 
+/** Return all cached summaries as an array. */
+export function getAllSummaries(): DailySummary[] {
+  return Array.from(cache.values());
+}
+
 /** Compute a 7-day average for a given day-of-week from history. */
 export function getDayOfWeekAverage(todayStr: string): { avgOrders: number; avgSales: number } | null {
   const today = parseDate(todayStr);

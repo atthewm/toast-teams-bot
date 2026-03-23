@@ -13,6 +13,23 @@ import {
 } from "./reports/index.js";
 import { pollAlerts, resetAlertState } from "./alerts/monitor.js";
 import { buildDailySummary, saveSummary } from "./cache/history.js";
+import {
+  getState,
+  getCurrentHour,
+  getCurrentDow,
+  getDayName,
+  formatSeconds,
+  formatHourLabel,
+  windowAverage,
+  windowCount,
+  getCurrentBaseline,
+  getCurrentTimeStr,
+  getBaselineForHour,
+} from "./intelligence/stats.js";
+import {
+  formatHourlyPulse,
+  formatShiftPerformance,
+} from "./alerts/formatters.js";
 
 /** Get today's YYYYMMDD in the configured timezone (not UTC). */
 function todayDateStr(tz: string): string {
@@ -143,8 +160,13 @@ app.on("activity", async ({ activity, send, next }) => {
           "**test marketplace** : Platform breakdown\n" +
           "**test morning/lunch/afternoon** : Rush recaps\n" +
           "**test alerts** : Check for active alerts\n" +
-          "**test drivethru** : Drive-thru speed report\n" +
+          "**test drivethru** : Drive thru speed report\n" +
           "**test eod** : End of day summary with comparisons\n" +
+          "**test baselines** : Hourly baselines for today\n" +
+          "**test pulse** : Hourly pulse for current hour\n" +
+          "**test shift** : Server performance breakdown\n" +
+          "**test stats** : Operational state dump\n" +
+          "**test rush** : Rush detection status\n" +
           "**test all** : Run all reports\n" +
           "**reset alerts** : Clear alert state\n\n" +
           "**Admin:**\n" +
@@ -188,7 +210,7 @@ app.on("activity", async ({ activity, send, next }) => {
       }
 
       // Test reports: run a specific report and post the result here
-      const testMatch = lower.match(/^test\s+(sales|marketplace|morning|lunch|afternoon|roster|alerts|drive-?thru|eod|all)$/);
+      const testMatch = lower.match(/^test\s+(sales|marketplace|morning|lunch|afternoon|roster|alerts|drive-?thru|eod|baselines?|pulse|shift|stats|rush|all)$/);
       if (testMatch) {
         const report = testMatch[1].replace("-", "");
         await send(`Running **${report}** report...`);
@@ -273,6 +295,94 @@ app.on("activity", async ({ activity, send, next }) => {
             const summary = await buildDailySummary(mcp, dateStr, config.timezone);
             saveSummary(summary);
             await send(await endOfDaySummary(mcp, config.timezone, summary));
+          }
+          if (report === "baselines" || report === "baseline") {
+            const st = getState();
+            const dow = getCurrentDow(config.timezone);
+            const dayName = getDayName(config.timezone);
+            let msg = `**Baselines for ${dayName}**\n\n`;
+            let hasData = false;
+            for (let h = 5; h <= 18; h++) {
+              const b = st.hourlyBaselines.get(`${dow}:${h}`);
+              if (!b) continue;
+              hasData = true;
+              const hLabel = formatHourLabel(h);
+              msg += `**${hLabel}**: ${b.avgOrders.toFixed(1)} orders, $${b.avgSales.toFixed(0)}`;
+              if (b.avgDriveThruSeconds > 0) msg += `, DT ${formatSeconds(b.avgDriveThruSeconds)}`;
+              msg += ` (${b.sampleCount} samples)\n`;
+            }
+            if (!hasData) {
+              msg += `No baseline data available. Baselines build from 14 days of history.\n`;
+            }
+            await send(msg);
+          }
+          if (report === "pulse") {
+            const st = getState();
+            const hour = getCurrentHour(config.timezone);
+            const prevHour = hour - 1;
+            const hourLabel = formatHourLabel(hour);
+            const orders = st.todayOrdersByHour.get(prevHour) ?? 0;
+            const sales = st.todaySalesByHour.get(prevHour) ?? 0;
+            const prevHourDt = st.todayDriveThruAll.filter((e) => {
+              const eH = parseInt(new Intl.DateTimeFormat("en-US", { timeZone: config.timezone, hour: "numeric", hour12: false }).format(new Date(e.timestamp)), 10);
+              return eH === prevHour;
+            });
+            const dtAvg = prevHourDt.length > 0 ? prevHourDt.reduce((s, e) => s + e.seconds, 0) / prevHourDt.length : null;
+            const baseline = getBaselineForHour(st, config.timezone, prevHour);
+            const dayName = getDayName(config.timezone);
+            const msg = formatHourlyPulse(hourLabel, orders, sales, dtAvg, prevHourDt.length, baseline, dayName, config.hourlyPulseDeviation);
+            await send(msg ?? `**${hourLabel} Pulse**: Everything tracking normal. No deviations to report.`);
+          }
+          if (report === "shift") {
+            const st = getState();
+            const servers: Array<{ name: string; dtAvg: number; dtOrders: number; voids: number }> = [];
+            for (const [name, stats] of st.todayServerStats) {
+              if (name === "Unknown") continue;
+              if (stats.dtOrders < config.shiftPerfMinOrders) continue;
+              servers.push({
+                name,
+                dtAvg: Math.round(stats.dtTotalSeconds / stats.dtOrders),
+                dtOrders: stats.dtOrders,
+                voids: stats.totalVoids,
+              });
+            }
+            if (servers.length === 0) {
+              await send("**Shift Performance**: No servers with enough drive thru orders yet. Need " + config.shiftPerfMinOrders + "+ DT orders per server.");
+            } else {
+              servers.sort((a, b) => a.dtAvg - b.dtAvg);
+              const teamTotal = servers.reduce((s, srv) => s + srv.dtAvg * srv.dtOrders, 0);
+              const teamOrders = servers.reduce((s, srv) => s + srv.dtOrders, 0);
+              const teamAvg = teamOrders > 0 ? Math.round(teamTotal / teamOrders) : 90;
+              await send(formatShiftPerformance(getCurrentTimeStr(config.timezone), servers, teamAvg, 90));
+            }
+          }
+          if (report === "stats") {
+            const st = getState();
+            const dtAvg = windowAverage(st.driveThruTimes);
+            let msg = `**Operational State**\n\n`;
+            msg += `Orders today: **${st.todayOrderCount}**, Sales: **$${st.todaySales.toFixed(2)}**\n`;
+            msg += `DT orders today: **${st.todayDriveThruAll.length}**\n`;
+            msg += `Rolling window (30 min): **${windowCount(st.orderVolume)}** orders, `;
+            msg += `DT avg: **${dtAvg ? formatSeconds(Math.round(dtAvg)) : "N/A"}** (${windowCount(st.driveThruTimes)} DT orders)\n`;
+            msg += `In rush: **${st.inRush ? "Yes" : "No"}**\n`;
+            msg += `Platforms today: ${Array.from(st.todayPlatformOrders.entries()).map(([p, s]) => `${p}: ${s.count}`).join(", ") || "none"}\n`;
+            msg += `Baseline slots: **${st.hourlyBaselines.size}**\n`;
+            msg += `Active cooldowns: **${st.lastAlertTimes.size}**\n`;
+            await send(msg);
+          }
+          if (report === "rush") {
+            const st = getState();
+            if (st.inRush) {
+              const duration = Date.now() - (st.rushStartTime ?? 0);
+              const mins = Math.round(duration / 60000);
+              await send(`**Rush Active**: Started ${mins} min ago. Peak rate: ${st.rushPeakRate} per 15 min. Orders since rush start: ${st.todayOrderCount - st.rushStartOrders}.`);
+            } else {
+              const baseline = getCurrentBaseline(st, config.timezone);
+              const fifteenMinAgo = Date.now() - 15 * 60 * 1000;
+              const recent = st.orderVolume.entries.filter((e) => e.timestamp >= fifteenMinAgo).length;
+              const baseRate = baseline ? (baseline.avgOrders / 4).toFixed(1) : "N/A";
+              await send(`**No Rush Active**: Current 15 min rate: ${recent} orders. Baseline: ${baseRate} per 15 min.`);
+            }
           }
         } catch (err) {
           await send(`Report error: ${(err as Error).message.slice(0, 200)}`);
