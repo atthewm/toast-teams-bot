@@ -278,10 +278,15 @@ export async function marketplaceBreakdown(
   const dateStr = businessDateInTz(timezone, -1);
   const display = displayDateInTz(timezone, -1);
 
+  // Matches the actual dining option names from Toast config
   const PLATFORMS: Record<string, string[]> = {
-    DoorDash: ["DoorDash", "DoorDash Delivery", "DoorDash Takeout"],
-    "Uber Eats": ["Uber Eats Delivery", "Uber Eats Takeout", "UberEats", "UberEats Delivery"],
+    DoorDash: ["DoorDash", "DoorDash Delivery", "DoorDash Takeout", "DoorDash - Delivery", "DoorDash - Takeout"],
+    "Uber Eats": ["Uber Eats", "Uber Eats - Delivery", "Uber Eats - Takeout", "UberEats", "UberEats Delivery"],
     Grubhub: ["Grubhub", "Grubhub Delivery"],
+    Google: ["Google Delivery", "Google Take Out"],
+    "Online Ordering": ["Online Ordering", "Online Ordering - Takeout", "Online Ordering - Delivery", "PX Online Ordering", "PX Take Out"],
+    "Craver App": ["Craver App"],
+    "Toast Delivery": ["Toast Delivery Services"],
   };
 
   try {

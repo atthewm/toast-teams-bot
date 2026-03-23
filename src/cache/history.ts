@@ -227,9 +227,13 @@ export async function buildDailySummary(
 
   // Platform breakdown
   const PLATFORMS: Record<string, string[]> = {
-    DoorDash: ["DoorDash", "DoorDash Delivery", "DoorDash Takeout"],
-    "Uber Eats": ["Uber Eats Delivery", "Uber Eats Takeout", "UberEats", "UberEats Delivery"],
+    DoorDash: ["DoorDash", "DoorDash Delivery", "DoorDash Takeout", "DoorDash - Delivery", "DoorDash - Takeout"],
+    "Uber Eats": ["Uber Eats", "Uber Eats - Delivery", "Uber Eats - Takeout", "UberEats", "UberEats Delivery"],
     Grubhub: ["Grubhub", "Grubhub Delivery"],
+    Google: ["Google Delivery", "Google Take Out"],
+    "Online Ordering": ["Online Ordering", "Online Ordering - Takeout", "Online Ordering - Delivery", "PX Online Ordering", "PX Take Out"],
+    "Craver App": ["Craver App"],
+    "Toast Delivery": ["Toast Delivery Services"],
     "Drive Thru": ["Drive Thru", "Drive-Thru", "DriveThru", "Drive Through"],
   };
 

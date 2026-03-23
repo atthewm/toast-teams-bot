@@ -25,6 +25,21 @@ export function analyzeSales(ctx: SalesContext): string[] {
   const insights: string[] = [];
   const dayName = ctx.dayOfWeek != null ? DAY_NAMES[ctx.dayOfWeek] : null;
 
+  // Baseline insights when no history is available yet
+  const hasHistory = ctx.yesterday || ctx.lastWeek || ctx.dowAvg;
+  if (!hasHistory) {
+    if (ctx.totalOrders > 0) {
+      insights.push(`${ctx.totalOrders} orders at $${ctx.avgOrder.toFixed(2)} average ticket. History is building. Comparisons start tomorrow.`);
+    }
+    if (ctx.voidCount > 0 && ctx.totalOrders > 0) {
+      const voidPct = (ctx.voidCount / ctx.totalOrders) * 100;
+      if (voidPct >= 3) {
+        insights.push(`${ctx.voidCount} voids (${voidPct.toFixed(1)}%). Worth a quick check with the team.`);
+      }
+    }
+    return insights;
+  }
+
   // vs yesterday
   if (ctx.yesterday) {
     const orderDelta = ctx.totalOrders - ctx.yesterday.totalOrders;
