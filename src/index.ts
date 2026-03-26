@@ -30,6 +30,23 @@ import {
   formatHourlyPulse,
   formatShiftPerformance,
 } from "./alerts/formatters.js";
+import { sendCard } from "./cards/send.js";
+import {
+  helpCard,
+  healthCard,
+  menusCard,
+  menuSearchCard,
+  ordersCard,
+  configCard,
+  statusCard,
+  capabilitiesCard,
+  channelRegisteredCard,
+  channelsListCard,
+  simpleMessageCard,
+  reportCard,
+  driveThruCard,
+  errorCard,
+} from "./cards/templates.js";
 
 /** Get today's YYYYMMDD in the configured timezone (not UTC). */
 function todayDateStr(tz: string): string {
@@ -51,6 +68,7 @@ function logToFile(msg: string) {
 }
 import { createChatPrompt, getMemory } from "./ai/prompt.js";
 import { startScheduler } from "./scheduler/index.js";
+import { startControlTowerScheduler } from "./control-tower/scheduler.js";
 import {
   registerChannel,
   getAllChannels,
@@ -106,6 +124,48 @@ mcp.connect().catch((err) => {
   log("MCP connect failed, will retry on first message:", err.message);
 });
 
+// -- Help sections for the helpCard --
+const HELP_SECTIONS = [
+  {
+    heading: "Commands",
+    commands: [
+      { name: "health", description: "System health check" },
+      { name: "menus", description: "Menu overview" },
+      { name: "menu search [term]", description: "Search menu items" },
+      { name: "orders", description: "Today's orders" },
+      { name: "config", description: "Restaurant configuration" },
+      { name: "status", description: "Authentication status" },
+      { name: "capabilities", description: "Available API features" },
+    ],
+  },
+  {
+    heading: "Reports",
+    commands: [
+      { name: "test sales", description: "Yesterday's sales summary" },
+      { name: "test marketplace", description: "Platform breakdown" },
+      { name: "test morning/lunch/afternoon", description: "Rush recaps" },
+      { name: "test alerts", description: "Check for active alerts" },
+      { name: "test drivethru", description: "Drive thru speed report" },
+      { name: "test eod", description: "End of day summary with comparisons" },
+      { name: "test baselines", description: "Hourly baselines for today" },
+      { name: "test pulse", description: "Hourly pulse for current hour" },
+      { name: "test shift", description: "Server performance breakdown" },
+      { name: "test stats", description: "Operational state dump" },
+      { name: "test rush", description: "Rush detection status" },
+      { name: "test all", description: "Run all reports" },
+      { name: "reset alerts", description: "Clear alert state" },
+    ],
+  },
+  {
+    heading: "Admin",
+    commands: [
+      { name: "register [channel]", description: "Register this channel for reports" },
+      { name: "channels", description: "List registered channels" },
+      { name: "unregister [channel]", description: "Remove a channel registration" },
+    ],
+  },
+];
+
 // -- Activity log for diagnostics --
 const activityLog: Array<{ time: string; type: string; from: string; convType: string; text: string }> = [];
 
@@ -146,34 +206,7 @@ app.on("activity", async ({ activity, send, next }) => {
     try {
       // Help
       if (lower === "help" || lower === "?") {
-        await send(
-          "**Toast Operations Bot**\n\n" +
-          "**Commands:**\n" +
-          "**health** : System health check\n" +
-          "**menus** : Menu overview\n" +
-          "**menu search [term]** : Search menu items\n" +
-          "**orders** : Today's orders\n" +
-          "**config** : Restaurant configuration\n" +
-          "**status** : Authentication status\n\n" +
-          "**Reports:**\n" +
-          "**test sales** : Yesterday's sales summary\n" +
-          "**test marketplace** : Platform breakdown\n" +
-          "**test morning/lunch/afternoon** : Rush recaps\n" +
-          "**test alerts** : Check for active alerts\n" +
-          "**test drivethru** : Drive thru speed report\n" +
-          "**test eod** : End of day summary with comparisons\n" +
-          "**test baselines** : Hourly baselines for today\n" +
-          "**test pulse** : Hourly pulse for current hour\n" +
-          "**test shift** : Server performance breakdown\n" +
-          "**test stats** : Operational state dump\n" +
-          "**test rush** : Rush detection status\n" +
-          "**test all** : Run all reports\n" +
-          "**reset alerts** : Clear alert state\n\n" +
-          "**Admin:**\n" +
-          "**register [channel]** : Register this channel for reports\n" +
-          "**channels** : List registered channels\n\n" +
-          "Or just ask me anything in plain English!"
-        );
+        await sendCard(send, helpCard("Toast Operations Bot", HELP_SECTIONS));
         return;
       }
 
@@ -184,15 +217,9 @@ app.on("activity", async ({ activity, send, next }) => {
         const conversationId = activity.conversation?.id ?? "";
         const serviceUrl = String((activity as unknown as Record<string, unknown>).serviceUrl ?? "");
         const userName = activity.from?.name ?? "unknown";
-        if (!conversationId) { await send("Could not detect conversation ID."); return; }
+        if (!conversationId) { await sendCard(send, errorCard("Registration Failed", "Could not detect conversation ID.")); return; }
         const reg = registerChannel(channelName, conversationId, serviceUrl, userName);
-        await send(
-          `**Channel Registered**\n\n` +
-          `Name: **${reg.name}**\n` +
-          `Conversation ID: \`${reg.conversationId}\`\n` +
-          `Registered by: ${reg.registeredBy}\n\n` +
-          `This channel will now receive scheduled reports targeted to **#${channelName}**.`
-        );
+        await sendCard(send, channelRegisteredCard(reg));
         return;
       }
 
@@ -200,12 +227,7 @@ app.on("activity", async ({ activity, send, next }) => {
       if (lower === "channels") {
         const channels = getAllChannels();
         const entries = Object.entries(channels);
-        if (entries.length === 0) { await send("No channels registered."); return; }
-        let msg = `**Registered Channels (${entries.length})**\n\n`;
-        for (const [name, reg] of entries) {
-          msg += `**${name}**: registered by ${reg.registeredBy}\n`;
-        }
-        await send(msg);
+        await sendCard(send, channelsListCard(entries));
         return;
       }
 
@@ -213,116 +235,118 @@ app.on("activity", async ({ activity, send, next }) => {
       const testMatch = lower.match(/^test\s+(sales|marketplace|morning|lunch|afternoon|roster|alerts|drive-?thru|eod|baselines?|pulse|shift|stats|rush|all)$/);
       if (testMatch) {
         const report = testMatch[1].replace("-", "");
-        await send(`Running **${report}** report...`);
+        await sendCard(send, simpleMessageCard("Running Report", `Generating ${report} report...`));
         try {
           if (report === "sales" || report === "all") {
-            await send(await dailySalesSummary(mcp, config.timezone));
+            await sendCard(send, reportCard("Daily Sales Summary", await dailySalesSummary(mcp, config.timezone)));
           }
           if (report === "marketplace" || report === "all") {
-            await send(await marketplaceBreakdown(mcp, config.timezone));
+            await sendCard(send, reportCard("Marketplace Breakdown", await marketplaceBreakdown(mcp, config.timezone)));
           }
           if (report === "morning" || report === "all") {
-            await send(await rushRecap(mcp, "Morning Rush Recap", 6, 10, config.timezone));
+            await sendCard(send, reportCard("Morning Rush Recap", await rushRecap(mcp, "Morning Rush Recap", 6, 10, config.timezone)));
           }
           if (report === "lunch" || report === "all") {
-            await send(await rushRecap(mcp, "Lunch Rush Recap", 11, 14, config.timezone));
+            await sendCard(send, reportCard("Lunch Rush Recap", await rushRecap(mcp, "Lunch Rush Recap", 11, 14, config.timezone)));
           }
           if (report === "afternoon" || report === "all") {
-            await send(await rushRecap(mcp, "Afternoon Recap", 14, 18, config.timezone));
+            await sendCard(send, reportCard("Afternoon Recap", await rushRecap(mcp, "Afternoon Recap", 14, 18, config.timezone)));
           }
           if (report === "roster" || report === "all") {
-            await send(await shiftRoster(mcp));
+            await sendCard(send, reportCard("Shift Roster", await shiftRoster(mcp)));
           }
           if (report === "alerts" || report === "all") {
             const alerts = await pollAlerts(mcp, config);
-            const count = alerts.largeOrders.length +
+            const alertCount = alerts.largeOrders.length +
               (alerts.voidAlert ? 1 : 0) +
               (alerts.longOpenAlert ? 1 : 0) +
               (alerts.driveThruAlert ? 1 : 0);
-            if (count === 0) {
-              await send("**Alert Check**: No active alerts right now.");
+            if (alertCount === 0) {
+              await sendCard(send, simpleMessageCard("Alert Check", "No active alerts right now.", "Good"));
             } else {
-              for (const msg of alerts.largeOrders) await send(msg);
-              if (alerts.voidAlert) await send(alerts.voidAlert);
-              if (alerts.longOpenAlert) await send(alerts.longOpenAlert);
-              if (alerts.driveThruAlert) await send(alerts.driveThruAlert);
+              for (const alertMsg of alerts.largeOrders) await sendCard(send, reportCard("Alert", alertMsg));
+              if (alerts.voidAlert) await sendCard(send, reportCard("Void Alert", alerts.voidAlert));
+              if (alerts.longOpenAlert) await sendCard(send, reportCard("Long Open Alert", alerts.longOpenAlert));
+              if (alerts.driveThruAlert) await sendCard(send, reportCard("Drive Thru Alert", alerts.driveThruAlert));
             }
           }
           if (report === "drivethru" || report === "all") {
             const dateStr = todayDateStr(config.timezone);
             const raw = await mcp.callToolText("toast_list_orders", { businessDate: dateStr, detailCount: 200 });
-            let data: { orders?: Array<{ diningOptionName?: string; openedDate?: string; closedDate?: string; voided?: boolean; displayNumber?: string; guid?: string }> } | null = null;
-            try { data = JSON.parse(raw); } catch { /* text */ }
+            let dtData: { orders?: Array<{ diningOptionName?: string; openedDate?: string; closedDate?: string; voided?: boolean; displayNumber?: string; guid?: string }> } | null = null;
+            try { dtData = JSON.parse(raw); } catch { /* text */ }
             const DT = ["drive thru", "drive-thru", "drivethru", "drive through"];
-            const dtOrders = (data?.orders ?? []).filter((o) => {
+            const dtOrders = (dtData?.orders ?? []).filter((o) => {
               if (!o.diningOptionName || !o.openedDate || !o.closedDate || o.voided) return false;
               return DT.some((n) => o.diningOptionName!.toLowerCase().includes(n));
             });
             if (dtOrders.length === 0) {
-              await send("**Drive-Thru Speed**: No completed drive-thru orders today.");
+              await sendCard(send, simpleMessageCard("Drive Thru Speed", "No completed drive thru orders today."));
             } else {
-              let total = 0;
-              let count2 = 0;
-              const lines: string[] = [];
+              let dtTotal = 0;
+              let dtCount = 0;
+              const recentOrders: Array<{ label: string; time: string }> = [];
               for (const o of dtOrders) {
                 const sec = Math.round((new Date(o.closedDate!).getTime() - new Date(o.openedDate!).getTime()) / 1000);
                 if (sec > 0 && sec < 3600) {
-                  total += sec;
-                  count2++;
+                  dtTotal += sec;
+                  dtCount++;
                   const m = Math.floor(sec / 60);
                   const s = sec % 60;
                   const num = o.displayNumber ?? o.guid?.slice(0, 8) ?? "?";
-                  lines.push(`#${num}: ${m}:${String(s).padStart(2, "0")}`);
+                  recentOrders.push({ label: `#${num}`, time: `${m}:${String(s).padStart(2, "0")}` });
                 }
               }
-              const avg = count2 > 0 ? Math.round(total / count2) : 0;
+              const avg = dtCount > 0 ? Math.round(dtTotal / dtCount) : 0;
               const avgM = Math.floor(avg / 60);
               const avgS = avg % 60;
-              const status = avg <= 90 ? "ON TARGET" : `${avg - 90}s OVER`;
-              let msg = `**Drive-Thru Speed Report**\n\n`;
-              msg += `Average: **${avgM}:${String(avgS).padStart(2, "0")}** (target: 1:30) ${status}\n`;
-              msg += `Completed: **${count2}** orders\n\n`;
-              for (const line of lines.slice(-10)) {
-                msg += `${line}\n`;
-              }
-              msg += `\n**Every order through in 1:30. That's the standard.**`;
-              await send(msg);
+              const onTarget = avg <= 90;
+              const statusText = onTarget ? "ON TARGET" : `${avg - 90}s OVER`;
+              await sendCard(send, driveThruCard({
+                avgMinutes: avgM,
+                avgSeconds: avgS,
+                completedCount: dtCount,
+                target: "1:30",
+                statusText,
+                onTarget,
+                recentOrders: recentOrders.slice(-10),
+              }));
             }
           }
           if (report === "eod" || report === "all") {
             const dateStr = todayDateStr(config.timezone);
-            await send("Building end of day summary...");
+            await sendCard(send, simpleMessageCard("End of Day", "Building end of day summary..."));
             const summary = await buildDailySummary(mcp, dateStr, config.timezone);
             saveSummary(summary);
-            await send(await endOfDaySummary(mcp, config.timezone, summary));
+            await sendCard(send, reportCard("End of Day Summary", await endOfDaySummary(mcp, config.timezone, summary)));
           }
           if (report === "baselines" || report === "baseline") {
             const st = getState();
             const dow = getCurrentDow(config.timezone);
             const dayName = getDayName(config.timezone);
-            let msg = `**Baselines for ${dayName}**\n\n`;
+            let baselineBody = "";
             let hasData = false;
             for (let h = 5; h <= 18; h++) {
               const b = st.hourlyBaselines.get(`${dow}:${h}`);
               if (!b) continue;
               hasData = true;
               const hLabel = formatHourLabel(h);
-              msg += `**${hLabel}**: ${b.avgOrders.toFixed(1)} orders, $${b.avgSales.toFixed(0)}`;
-              if (b.avgDriveThruSeconds > 0) msg += `, DT ${formatSeconds(b.avgDriveThruSeconds)}`;
-              msg += ` (${b.sampleCount} samples)\n`;
+              baselineBody += `${hLabel}: ${b.avgOrders.toFixed(1)} orders, $${b.avgSales.toFixed(0)}`;
+              if (b.avgDriveThruSeconds > 0) baselineBody += `, DT ${formatSeconds(b.avgDriveThruSeconds)}`;
+              baselineBody += ` (${b.sampleCount} samples)\n`;
             }
             if (!hasData) {
-              msg += `No baseline data available. Baselines build from 14 days of history.\n`;
+              baselineBody = "No baseline data available. Baselines build from 14 days of history.";
             }
-            await send(msg);
+            await sendCard(send, reportCard(`Baselines for ${dayName}`, baselineBody));
           }
           if (report === "pulse") {
             const st = getState();
             const hour = getCurrentHour(config.timezone);
             const prevHour = hour - 1;
             const hourLabel = formatHourLabel(hour);
-            const orders = st.todayOrdersByHour.get(prevHour) ?? 0;
-            const sales = st.todaySalesByHour.get(prevHour) ?? 0;
+            const pulseOrders = st.todayOrdersByHour.get(prevHour) ?? 0;
+            const pulseSales = st.todaySalesByHour.get(prevHour) ?? 0;
             const prevHourDt = st.todayDriveThruAll.filter((e) => {
               const eH = parseInt(new Intl.DateTimeFormat("en-US", { timeZone: config.timezone, hour: "numeric", hour12: false }).format(new Date(e.timestamp)), 10);
               return eH === prevHour;
@@ -330,8 +354,8 @@ app.on("activity", async ({ activity, send, next }) => {
             const dtAvg = prevHourDt.length > 0 ? prevHourDt.reduce((s, e) => s + e.seconds, 0) / prevHourDt.length : null;
             const baseline = getBaselineForHour(st, config.timezone, prevHour);
             const dayName = getDayName(config.timezone);
-            const msg = formatHourlyPulse(hourLabel, orders, sales, dtAvg, prevHourDt.length, baseline, dayName, config.hourlyPulseDeviation);
-            await send(msg ?? `**${hourLabel} Pulse**: Everything tracking normal. No deviations to report.`);
+            const pulseMsg = formatHourlyPulse(hourLabel, pulseOrders, pulseSales, dtAvg, prevHourDt.length, baseline, dayName, config.hourlyPulseDeviation);
+            await sendCard(send, reportCard(`${hourLabel} Pulse`, pulseMsg ?? "Everything tracking normal. No deviations to report."));
           }
           if (report === "shift") {
             const st = getState();
@@ -347,45 +371,44 @@ app.on("activity", async ({ activity, send, next }) => {
               });
             }
             if (servers.length === 0) {
-              await send("**Shift Performance**: No servers with enough drive thru orders yet. Need " + config.shiftPerfMinOrders + "+ DT orders per server.");
+              await sendCard(send, simpleMessageCard("Shift Performance", `No servers with enough drive thru orders yet. Need ${config.shiftPerfMinOrders}+ DT orders per server.`));
             } else {
               servers.sort((a, b) => a.dtAvg - b.dtAvg);
               const teamTotal = servers.reduce((s, srv) => s + srv.dtAvg * srv.dtOrders, 0);
               const teamOrders = servers.reduce((s, srv) => s + srv.dtOrders, 0);
               const teamAvg = teamOrders > 0 ? Math.round(teamTotal / teamOrders) : 90;
-              await send(formatShiftPerformance(getCurrentTimeStr(config.timezone), servers, teamAvg, 90));
+              await sendCard(send, reportCard("Shift Performance", formatShiftPerformance(getCurrentTimeStr(config.timezone), servers, teamAvg, 90)));
             }
           }
           if (report === "stats") {
             const st = getState();
-            const dtAvg = windowAverage(st.driveThruTimes);
-            let msg = `**Operational State**\n\n`;
-            msg += `Orders today: **${st.todayOrderCount}**, Sales: **$${st.todaySales.toFixed(2)}**\n`;
-            msg += `DT orders today: **${st.todayDriveThruAll.length}**\n`;
-            msg += `Rolling window (30 min): **${windowCount(st.orderVolume)}** orders, `;
-            msg += `DT avg: **${dtAvg ? formatSeconds(Math.round(dtAvg)) : "N/A"}** (${windowCount(st.driveThruTimes)} DT orders)\n`;
-            msg += `In rush: **${st.inRush ? "Yes" : "No"}**\n`;
-            msg += `Platforms today: ${Array.from(st.todayPlatformOrders.entries()).map(([p, s]) => `${p}: ${s.count}`).join(", ") || "none"}\n`;
-            msg += `Baseline slots: **${st.hourlyBaselines.size}**\n`;
-            msg += `Active cooldowns: **${st.lastAlertTimes.size}**\n`;
-            await send(msg);
+            const statsDtAvg = windowAverage(st.driveThruTimes);
+            let statsBody = `Orders today: ${st.todayOrderCount}, Sales: $${st.todaySales.toFixed(2)}\n`;
+            statsBody += `DT orders today: ${st.todayDriveThruAll.length}\n`;
+            statsBody += `Rolling window (30 min): ${windowCount(st.orderVolume)} orders, `;
+            statsBody += `DT avg: ${statsDtAvg ? formatSeconds(Math.round(statsDtAvg)) : "N/A"} (${windowCount(st.driveThruTimes)} DT orders)\n`;
+            statsBody += `In rush: ${st.inRush ? "Yes" : "No"}\n`;
+            statsBody += `Platforms today: ${Array.from(st.todayPlatformOrders.entries()).map(([p, s]) => `${p}: ${s.count}`).join(", ") || "none"}\n`;
+            statsBody += `Baseline slots: ${st.hourlyBaselines.size}\n`;
+            statsBody += `Active cooldowns: ${st.lastAlertTimes.size}`;
+            await sendCard(send, reportCard("Operational State", statsBody));
           }
           if (report === "rush") {
             const st = getState();
             if (st.inRush) {
               const duration = Date.now() - (st.rushStartTime ?? 0);
               const mins = Math.round(duration / 60000);
-              await send(`**Rush Active**: Started ${mins} min ago. Peak rate: ${st.rushPeakRate} per 15 min. Orders since rush start: ${st.todayOrderCount - st.rushStartOrders}.`);
+              await sendCard(send, reportCard("Rush Active", `Started ${mins} min ago. Peak rate: ${st.rushPeakRate} per 15 min. Orders since rush start: ${st.todayOrderCount - st.rushStartOrders}.`));
             } else {
-              const baseline = getCurrentBaseline(st, config.timezone);
+              const rushBaseline = getCurrentBaseline(st, config.timezone);
               const fifteenMinAgo = Date.now() - 15 * 60 * 1000;
               const recent = st.orderVolume.entries.filter((e) => e.timestamp >= fifteenMinAgo).length;
-              const baseRate = baseline ? (baseline.avgOrders / 4).toFixed(1) : "N/A";
-              await send(`**No Rush Active**: Current 15 min rate: ${recent} orders. Baseline: ${baseRate} per 15 min.`);
+              const baseRate = rushBaseline ? (rushBaseline.avgOrders / 4).toFixed(1) : "N/A";
+              await sendCard(send, reportCard("No Rush Active", `Current 15 min rate: ${recent} orders. Baseline: ${baseRate} per 15 min.`));
             }
           }
         } catch (err) {
-          await send(`Report error: ${(err as Error).message.slice(0, 200)}`);
+          await sendCard(send, errorCard("Report Error", (err as Error).message.slice(0, 200)));
         }
         return;
       }
@@ -393,39 +416,56 @@ app.on("activity", async ({ activity, send, next }) => {
       // Reset alerts: clear persisted alert state
       if (lower === "reset alerts") {
         resetAlertState();
-        await send("**Alert state reset.** All seen orders cleared. Next poll will evaluate fresh.");
+        await sendCard(send, simpleMessageCard("Alert State Reset", "All seen orders cleared. Next poll will evaluate fresh.", "Good"));
         return;
       }
 
       // Health
       if (/^health(check)?$/.test(lower)) {
-        await send("Running health check...");
-        const data = await mcp.callToolJson<Record<string, unknown>>("toast_healthcheck");
-        if (!data) { await send(await mcp.callToolText("toast_healthcheck")); return; }
-        const checks = data.checks as Record<string, { status: string; message: string; durationMs?: number }>;
-        let reply = `**Health: ${data.overall}**\n\n`;
-        if (checks) {
-          for (const [name, check] of Object.entries(checks)) {
-            reply += `${check.status === "pass" ? "Pass" : "FAIL"} **${name}**: ${check.message}\n`;
-          }
-        }
-        await send(reply);
+        await sendCard(send, simpleMessageCard("Health Check", "Running health check..."));
+        const hcData = await mcp.callToolJson<Record<string, unknown>>("toast_healthcheck");
+        if (!hcData) { await send(await mcp.callToolText("toast_healthcheck")); return; }
+        await sendCard(send, healthCard(hcData));
         return;
       }
 
       // Orders
       if (/^orders?/.test(lower)) {
-        await send("Fetching today's orders...");
+        await sendCard(send, simpleMessageCard("Orders", "Fetching today's orders..."));
         const today = todayDateStr(config.timezone);
         const rawText = await mcp.callToolText("toast_list_orders", { businessDate: today });
-        await send(rawText.slice(0, 3000));
+        let orderData: {
+          totalOrders?: number;
+          totalSales?: number;
+          detailsFetched?: number;
+          orders?: Array<{
+            guid?: string;
+            displayNumber?: string;
+            openedDate?: string;
+            total?: number;
+            itemCount?: number;
+            voided?: boolean;
+          }>;
+        } | null = null;
+        try { orderData = JSON.parse(rawText); } catch { /* plain text */ }
+        if (!orderData || !orderData.orders) {
+          await sendCard(send, simpleMessageCard("Orders", "No orders found for today."));
+        } else {
+          await sendCard(send, ordersCard(orderData, today));
+        }
         return;
       }
 
       // Menus
       if (/^menus?$/.test(lower)) {
-        const rawText = await mcp.callToolText("toast_get_menu_metadata");
-        await send(rawText.slice(0, 3000));
+        const menuRaw = await mcp.callToolText("toast_get_menu_metadata");
+        let menuData: { menuCount: number; menus: Array<{ guid: string; name: string; groupCount: number }> } | null = null;
+        try { menuData = JSON.parse(menuRaw); } catch { /* plain text */ }
+        if (!menuData || !menuData.menus) {
+          await send(menuRaw.slice(0, 3000));
+        } else {
+          await sendCard(send, menusCard(menuData));
+        }
         return;
       }
 
@@ -433,15 +473,20 @@ app.on("activity", async ({ activity, send, next }) => {
       const searchMatch = lower.match(/^(?:menu search|search)\s+(.+)/);
       if (searchMatch) {
         const query = searchMatch[1];
-        await send(`Searching for "${query}"...`);
-        const rawText = await mcp.callToolText("toast_search_menu_items", { query });
-        await send(rawText.slice(0, 3000));
+        await sendCard(send, simpleMessageCard("Menu Search", `Searching for "${query}"...`));
+        const searchRaw = await mcp.callToolText("toast_search_menu_items", { query });
+        let searchData: { results?: Array<{ item: { name: string; price?: number }; menuName: string; groupName: string }> } | null = null;
+        try { searchData = JSON.parse(searchRaw); } catch { /* plain text */ }
+        if (!searchData || !searchData.results || searchData.results.length === 0) {
+          await sendCard(send, simpleMessageCard("Menu Search", `No items found matching "${query}".`));
+        } else {
+          await sendCard(send, menuSearchCard(query, searchData.results));
+        }
         return;
       }
 
-      // Natural language fallback
+      // Natural language fallback (keep as plain text since LLM formats its own response)
       if (prompt) {
-        // Use channel ID without message suffix as stable key
         const convKey = (activity.conversation?.id ?? "default").split(";")[0];
         const memory = getMemory(convKey);
         await memory.push({ role: "user" as const, content: text });
@@ -451,10 +496,10 @@ app.on("activity", async ({ activity, send, next }) => {
         return;
       }
 
-      await send(`Command not recognized: "${text}". Type **help** for commands.`);
+      await sendCard(send, simpleMessageCard("Unknown Command", `Command not recognized: "${text}". Type help for commands.`));
     } catch (err) {
       logToFile("CHANNEL_ERROR: " + (err as Error).message);
-      await send(`Error: ${(err as Error).message.slice(0, 200)}`);
+      await sendCard(send, errorCard("Error", (err as Error).message.slice(0, 200)));
     }
   }
 });
@@ -487,22 +532,7 @@ async function getUserRole(userId: string): Promise<Role> {
 // ---- Command: help ----
 app.message(/^(help|\?)$/i, async ({ send, activity }) => {
   logToFile("HELP handler fired. convType=" + activity.conversation?.conversationType + " from=" + activity.from?.name);
-  await send(
-    "**Toast Operations Bot**\n\n" +
-    "**Commands:**\n" +
-    "**health** : System health check\n" +
-    "**menus** : Menu overview\n" +
-    "**menu search [term]** : Search menu items\n" +
-    "**orders** : Today's orders\n" +
-    "**config** : Restaurant configuration\n" +
-    "**status** : Authentication status\n" +
-    "**capabilities** : Available API features\n\n" +
-    "**Admin:**\n" +
-    "**register [channel]** : Register this channel for reports (e.g. register ops-control)\n" +
-    "**channels** : List registered channels\n" +
-    "**unregister [channel]** : Remove a channel registration\n\n" +
-    "Or just ask me anything in plain English!"
-  );
+  await sendCard(send, helpCard("Toast Operations Bot", HELP_SECTIONS));
 });
 
 // ---- Command: health ----
@@ -510,28 +540,13 @@ app.message(/^health(check)?$/i, async ({ send, activity }) => {
   const role = await getUserRole(activity.from?.id ?? "");
   if (!hasPermission(role, "health")) { await send(denyMessage("health")); return; }
 
-  await send("Running health check...");
+  await sendCard(send, simpleMessageCard("Health Check", "Running health check..."));
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_healthcheck");
     if (!data) { await send(await mcp.callToolText("toast_healthcheck")); return; }
-    const checks = data.checks as Record<string, { status: string; message: string; durationMs?: number }>;
-    const cfg = data.config as Record<string, unknown>;
-
-    let text = `**Health: ${data.overall}**\n\n`;
-    if (checks) {
-      for (const [name, check] of Object.entries(checks)) {
-        const icon = check.status === "pass" ? "Pass" : "FAIL";
-        text += `${icon} **${name}**: ${check.message}`;
-        if (check.durationMs) text += ` (${check.durationMs}ms)`;
-        text += "\n";
-      }
-    }
-    if (cfg) {
-      text += `\nRestaurants: ${cfg.restaurantsConfigured}, Writes: ${cfg.writesEnabled ? "On" : "Off"}, Dry Run: ${cfg.dryRun ? "Yes" : "No"}`;
-    }
-    await send(text);
+    await sendCard(send, healthCard(data));
   } catch (err) {
-    await send(`Health check failed: ${(err as Error).message}`);
+    await sendCard(send, errorCard("Health Check Failed", (err as Error).message));
   }
 });
 
@@ -543,32 +558,24 @@ app.message(/^(menu search|search menu)\s+(.+)/i, async ({ send, activity }) => 
   const match = activity.text?.match(/(menu search|search menu)\s+(.+)/i);
   const query = match?.[2]?.trim() ?? "";
   if (!query) {
-    await send("Please provide a search term. Example: **menu search espresso**");
+    await sendCard(send, simpleMessageCard("Menu Search", "Please provide a search term. Example: menu search espresso"));
     return;
   }
 
-  await send(`Searching for "${query}"...`);
+  await sendCard(send, simpleMessageCard("Menu Search", `Searching for "${query}"...`));
   try {
     const rawText = await mcp.callToolText("toast_search_menu_items", { query });
     let data: { results?: Array<{ item: { name: string; price?: number }; menuName: string; groupName: string }> } | null = null;
     try { data = JSON.parse(rawText); } catch { /* plain text */ }
 
     if (!data || !data.results || data.results.length === 0) {
-      await send(`No items found matching "${query}".`);
+      await sendCard(send, simpleMessageCard("Menu Search", `No items found matching "${query}".`));
       return;
     }
 
-    let text = `**Menu Search: "${query}"** (${data.results.length} results)\n\n`;
-    for (const r of data.results.slice(0, 15)) {
-      const price = r.item.price != null ? `$${r.item.price.toFixed(2)}` : "N/A";
-      text += `**${r.item.name}** ${price} (${r.menuName} > ${r.groupName})\n`;
-    }
-    if (data.results.length > 15) {
-      text += `\n... and ${data.results.length - 15} more`;
-    }
-    await send(text);
+    await sendCard(send, menuSearchCard(query, data.results));
   } catch (err) {
-    await send(`Menu search failed: ${(err as Error).message}`);
+    await sendCard(send, errorCard("Menu Search Failed", (err as Error).message));
   }
 });
 
@@ -588,13 +595,9 @@ app.message(/^menus?$/i, async ({ send, activity }) => {
       return;
     }
 
-    let text = `**Menus (${data.menuCount})**\n\n`;
-    for (const m of data.menus) {
-      text += `**${m.name}**: ${m.groupCount} group${m.groupCount === 1 ? "" : "s"}\n`;
-    }
-    await send(text);
+    await sendCard(send, menusCard(data));
   } catch (err) {
-    await send(`Failed to fetch menus: ${(err as Error).message}`);
+    await sendCard(send, errorCard("Menus Failed", (err as Error).message));
   }
 });
 
@@ -603,7 +606,7 @@ app.message(/^orders?(\s+today)?$/i, async ({ send, activity }) => {
   const role = await getUserRole(activity.from?.id ?? "");
   if (!hasPermission(role, "orders")) { await send(denyMessage("orders")); return; }
 
-  await send("Fetching today's orders...");
+  await sendCard(send, simpleMessageCard("Orders", "Fetching today's orders..."));
   try {
     const today = todayDateStr(config.timezone);
     const rawText = await mcp.callToolText("toast_list_orders", { businessDate: today });
@@ -624,25 +627,13 @@ app.message(/^orders?(\s+today)?$/i, async ({ send, activity }) => {
     try { data = JSON.parse(rawText); } catch { /* plain text */ }
 
     if (!data || !data.orders || data.orders.length === 0) {
-      await send("No orders found for today.");
+      await sendCard(send, simpleMessageCard("Orders", "No orders found for today."));
       return;
     }
 
-    let text = `**Orders for ${today}**\n\n`;
-    text += `Total orders: **${data.totalOrders}**\n`;
-    text += `Total sales: **$${data.totalSales?.toFixed(2) ?? "N/A"}**\n`;
-    text += `(showing ${data.detailsFetched} of ${data.totalOrders})\n\n`;
-
-    for (const o of data.orders) {
-      if (o.voided) continue;
-      const num = o.displayNumber ?? o.guid?.slice(0, 8) ?? "?";
-      const total = o.total != null ? `$${o.total.toFixed(2)}` : "";
-      const items = o.itemCount ? `${o.itemCount} item${o.itemCount === 1 ? "" : "s"}` : "";
-      text += `#${num} ${total} ${items}\n`;
-    }
-    await send(text);
+    await sendCard(send, ordersCard(data, today));
   } catch (err) {
-    await send(`Failed to fetch orders: ${(err as Error).message}`);
+    await sendCard(send, errorCard("Orders Failed", (err as Error).message));
   }
 });
 
@@ -654,27 +645,9 @@ app.message(/^config(uration)?$/i, async ({ send, activity }) => {
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_get_config_summary");
     if (!data) { await send(await mcp.callToolText("toast_get_config_summary")); return; }
-    const restaurant = data.restaurant as Record<string, unknown> | null;
-    const revenueCenters = data.revenueCenters as Array<{ name: string }>;
-    const diningOptions = data.diningOptions as Array<{ name: string }>;
-    const serviceAreas = data.serviceAreas as Array<{ name: string }>;
-
-    let text = `**${restaurant?.name ?? "Restaurant Configuration"}**\n\n`;
-    if (restaurant) {
-      text += `Timezone: ${restaurant.timezone ?? "N/A"}, Currency: ${restaurant.currencyCode ?? "N/A"}\n\n`;
-    }
-    if (revenueCenters?.length > 0) {
-      text += `**Revenue Centers (${revenueCenters.length})**: ${revenueCenters.map(r => r.name).join(", ")}\n`;
-    }
-    if (diningOptions?.length > 0) {
-      text += `**Dining Options (${diningOptions.length})**: ${diningOptions.map(d => d.name).join(", ")}\n`;
-    }
-    if (serviceAreas?.length > 0) {
-      text += `**Service Areas (${serviceAreas.length})**: ${serviceAreas.map(s => s.name).join(", ")}\n`;
-    }
-    await send(text);
+    await sendCard(send, configCard(data));
   } catch (err) {
-    await send(`Failed to fetch config: ${(err as Error).message}`);
+    await sendCard(send, errorCard("Config Failed", (err as Error).message));
   }
 });
 
@@ -686,16 +659,9 @@ app.message(/^(status|auth)$/i, async ({ send, activity }) => {
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_auth_status");
     if (!data) { await send(await mcp.callToolText("toast_auth_status")); return; }
-    await send(
-      `**Authentication Status**\n\n` +
-      `Authenticated: **${data.authenticated}**\n` +
-      `API Host: ${data.apiHost}\n` +
-      `Restaurants: ${(data.configuredRestaurants as string[])?.length ?? 0}\n` +
-      `Writes Enabled: ${data.writesEnabled}\n` +
-      `Dry Run: ${data.dryRun}`
-    );
+    await sendCard(send, statusCard(data));
   } catch (err) {
-    await send(`Status check failed: ${(err as Error).message}`);
+    await sendCard(send, errorCard("Status Check Failed", (err as Error).message));
   }
 });
 
@@ -706,9 +672,9 @@ app.message(/^capabilities$/i, async ({ send, activity }) => {
 
   try {
     const data = await mcp.callToolJson<Record<string, unknown>>("toast_api_capabilities");
-    await send(`**API Capabilities**\n\n\`\`\`json\n${JSON.stringify(data, null, 2).slice(0, 2000)}\n\`\`\``);
+    await sendCard(send, capabilitiesCard(data ?? {}));
   } catch (err) {
-    await send(`Failed: ${(err as Error).message}`);
+    await sendCard(send, errorCard("Capabilities Failed", (err as Error).message));
   }
 });
 
@@ -720,7 +686,7 @@ app.message(/^register\s+(\S+)/i, async ({ send, activity }) => {
   const match = activity.text?.match(/register\s+(\S+)/i);
   const channelName = match?.[1]?.toLowerCase();
   if (!channelName) {
-    await send("Usage: **register [channel-name]**\n\nExamples: register ops-control, register finance, register marketing");
+    await sendCard(send, simpleMessageCard("Register", "Usage: register [channel name]\n\nExamples: register ops, register finance, register marketing"));
     return;
   }
 
@@ -730,19 +696,12 @@ app.message(/^register\s+(\S+)/i, async ({ send, activity }) => {
   const userName = activity.from?.name ?? activity.from?.id ?? "unknown";
 
   if (!conversationId) {
-    await send("Could not detect conversation ID. Make sure you run this in a Teams channel.");
+    await sendCard(send, errorCard("Registration Failed", "Could not detect conversation ID. Make sure you run this in a Teams channel."));
     return;
   }
 
   const reg = registerChannel(channelName, conversationId, serviceUrl, userName, teamId);
-
-  await send(
-    `**Channel Registered**\n\n` +
-    `Name: **${reg.name}**\n` +
-    `Conversation ID: \`${reg.conversationId}\`\n` +
-    `Registered by: ${reg.registeredBy}\n\n` +
-    `This channel will now receive scheduled reports targeted to **#${channelName}**.`
-  );
+  await sendCard(send, channelRegisteredCard(reg));
 });
 
 // ---- Command: channels ----
@@ -752,17 +711,7 @@ app.message(/^channels$/i, async ({ send, activity }) => {
 
   const channels = getAllChannels();
   const entries = Object.entries(channels);
-
-  if (entries.length === 0) {
-    await send("No channels registered. Use **register [name]** in a channel to set it up.");
-    return;
-  }
-
-  let text = `**Registered Channels (${entries.length})**\n\n`;
-  for (const [name, reg] of entries) {
-    text += `**${name}**: \`${reg.conversationId.slice(0, 30)}...\` (by ${reg.registeredBy})\n`;
-  }
-  await send(text);
+  await sendCard(send, channelsListCard(entries));
 });
 
 // ---- Command: unregister [channel-name] ----
@@ -773,14 +722,14 @@ app.message(/^unregister\s+(\S+)/i, async ({ send, activity }) => {
   const match = activity.text?.match(/unregister\s+(\S+)/i);
   const channelName = match?.[1]?.toLowerCase();
   if (!channelName) {
-    await send("Usage: **unregister [channel-name]**");
+    await sendCard(send, simpleMessageCard("Unregister", "Usage: unregister [channel name]"));
     return;
   }
 
   if (removeChannel(channelName)) {
-    await send(`Channel **${channelName}** unregistered. It will no longer receive reports.`);
+    await sendCard(send, simpleMessageCard("Channel Unregistered", `Channel ${channelName} unregistered. It will no longer receive reports.`, "Good"));
   } else {
-    await send(`Channel **${channelName}** was not registered.`);
+    await sendCard(send, simpleMessageCard("Not Found", `Channel ${channelName} was not registered.`, "Warning"));
   }
 });
 
@@ -793,7 +742,7 @@ app.on("message", async ({ send, activity }) => {
   logToFile("FALLBACK: convType=" + activity.conversation?.conversationType + " raw=" + JSON.stringify(raw).slice(0, 150) + " stripped=" + text.slice(0, 80));
 
   if (text.length < 2) {
-    await send("Type **help** to see commands, or ask me anything.");
+    await sendCard(send, simpleMessageCard("Toast Ops", "Type help to see commands, or ask me anything."));
     return;
   }
 
@@ -822,19 +771,12 @@ app.on("message", async ({ send, activity }) => {
     const userName = activity.from?.name ?? activity.from?.id ?? "unknown";
 
     if (!conversationId) {
-      await send("Could not detect conversation ID. Make sure you run this in a Teams channel.");
+      await sendCard(send, errorCard("Registration Failed", "Could not detect conversation ID. Make sure you run this in a Teams channel."));
       return;
     }
 
     const reg = registerChannel(channelName, conversationId, serviceUrl, userName, teamId);
-
-    await send(
-      `**Channel Registered**\n\n` +
-      `Name: **${reg.name}**\n` +
-      `Conversation ID: \`${reg.conversationId}\`\n` +
-      `Registered by: ${reg.registeredBy}\n\n` +
-      `This channel will now receive scheduled reports targeted to **#${channelName}**.`
-    );
+    await sendCard(send, channelRegisteredCard(reg));
     return;
   }
 
@@ -845,17 +787,7 @@ app.on("message", async ({ send, activity }) => {
 
     const channels = getAllChannels();
     const entries = Object.entries(channels);
-
-    if (entries.length === 0) {
-      await send("No channels registered. Use **register [name]** in a channel to set it up.");
-      return;
-    }
-
-    let msg = `**Registered Channels (${entries.length})**\n\n`;
-    for (const [name, reg] of entries) {
-      msg += `**${name}**: \`${reg.conversationId.slice(0, 30)}...\` (by ${reg.registeredBy})\n`;
-    }
-    await send(msg);
+    await sendCard(send, channelsListCard(entries));
     return;
   }
 
@@ -867,22 +799,23 @@ app.on("message", async ({ send, activity }) => {
 
     const channelName = unregisterMatch[1];
     if (removeChannel(channelName)) {
-      await send(`Channel **${channelName}** unregistered. It will no longer receive reports.`);
+      await sendCard(send, simpleMessageCard("Channel Unregistered", `Channel ${channelName} unregistered. It will no longer receive reports.`, "Good"));
     } else {
-      await send(`Channel **${channelName}** was not registered.`);
+      await sendCard(send, simpleMessageCard("Not Found", `Channel ${channelName} was not registered.`, "Warning"));
     }
     return;
   }
 
   // ---- Natural language: route through ChatPrompt + OpenAI + MCP ----
+  // Keep AI responses as plain text since the LLM formats its own response
   const role = await getUserRole(activity.from?.id ?? "");
   if (!hasPermission(role, "ai")) {
-    await send("You don't have permission to use the AI assistant. Type **help** for available commands.");
+    await sendCard(send, simpleMessageCard("Permission Denied", "You don't have permission to use the AI assistant. Type help for available commands.", "Attention"));
     return;
   }
 
   if (!prompt) {
-    await send("AI mode is not available (initialization failed). Use direct commands instead. Type **help**.");
+    await sendCard(send, simpleMessageCard("AI Unavailable", "AI mode is not available (initialization failed). Use direct commands instead. Type help."));
     return;
   }
 
@@ -897,17 +830,18 @@ app.on("message", async ({ send, activity }) => {
 
     const reply = response.content ?? "I wasn't able to generate a response. Try rephrasing or use a direct command.";
 
+    // AI responses stay as plain text since the LLM formats its own markdown
     await send(reply);
   } catch (err) {
     const errMsg = (err as Error).message;
     log("AI error:", errMsg);
 
     if (errMsg.includes("401") || errMsg.includes("auth")) {
-      await send("AI service authentication error. Check the OPENAI_API_KEY configuration.");
+      await sendCard(send, errorCard("AI Authentication Error", "Check the OPENAI_API_KEY configuration."));
     } else if (errMsg.includes("429") || errMsg.includes("rate")) {
-      await send("AI service is rate limited. Try again in a moment, or use a direct command.");
+      await sendCard(send, errorCard("AI Rate Limited", "Try again in a moment, or use a direct command."));
     } else {
-      await send(`AI error: ${errMsg.slice(0, 200)}\n\nTry using a direct command instead (type **help**).`);
+      await sendCard(send, errorCard("AI Error", `${errMsg.slice(0, 200)}\n\nTry using a direct command instead (type help).`));
     }
   }
 });
@@ -920,6 +854,9 @@ app.start(config.port).then(() => {
 
   // Start the scheduler for automated reports and real-time alerts
   startScheduler(app, mcp, config.timezone, config);
+
+  // Start the control tower scheduler (shadow mode, posts to #shadow-pilot)
+  startControlTowerScheduler(app, mcp, config.timezone, config);
 }).catch((err) => {
   log("Fatal:", err.message);
   process.exit(1);

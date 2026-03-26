@@ -1,0 +1,157 @@
+{
+  "_comment": "All thresholds are defaults to tune after initial shadow mode run against real data.",
+  "mode": "shadow",
+  "pilotChannel": "shadow-pilot",
+  "globalCooldownMinutes": 120,
+  "schedules": {
+    "morningReadiness": "0 7 * * *",
+    "readinessEscalation": "0 10 * * *",
+    "dailyPrimeCost": "0 7 * * *",
+    "itemMarginWeekly": "0 8 * * 1",
+    "vendorPriceDaily": "0 7 * * *",
+    "salesPaceMidDay": "0 13 * * *",
+    "salesPaceAfternoon": "0 16 * * *",
+    "laborEfficiency": "0 7 * * *",
+    "discountCompVoid": "0 7 * * *",
+    "stockoutCheck": "0 9 * * *",
+    "dailyOpsDigest": "0 18 * * *",
+    "weeklyExecSummary": "0 8 * * 1"
+  },
+  "thresholds": {
+    "readiness": {
+      "_comment": "Target and severity gates for the morning readiness score.",
+      "target": 85,
+      "yellowThreshold": 85,
+      "redThreshold": 70,
+      "morningRunHour": 7,
+      "escalationHour": 10,
+      "weights": {
+        "_comment": "Weights should sum to 100.",
+        "invoicesCaptured": 25,
+        "recipeCoverage": 25,
+        "productMapping": 20,
+        "inventoryRecency": 15,
+        "vendorMapping": 10,
+        "unmappedIngredients": 5
+      }
+    },
+    "primeCost": {
+      "_comment_labor": "Labor target 30% is aggressive for drive thru coffee; adjust after baseline.",
+      "_comment_cogs": "COGS target 30% is standard for coffee and taco concept; adjust after baseline.",
+      "laborTarget": 0.30,
+      "cogsTarget": 0.30,
+      "primeCostTarget": 0.60,
+      "dailySalesTarget": 2500,
+      "laborYellowThreshold": 0.33,
+      "laborRedThreshold": 0.38,
+      "cogsYellowThreshold": 0.33,
+      "cogsRedThreshold": 0.38,
+      "primeCostYellowThreshold": 0.63,
+      "primeCostRedThreshold": 0.68,
+      "salesDeviationYellow": 0.15,
+      "salesDeviationRed": 0.25,
+      "trailingDays": 28
+    },
+    "itemMargin": {
+      "_comment": "65% margin target is standard for specialty coffee drinks.",
+      "minMarginPercent": 0.65,
+      "compressionTolerancePercent": 0.05,
+      "topSellerThreshold": 10,
+      "highVolumeMinUnits": 20
+    },
+    "vendorPrice": {
+      "_comment": "10% spike triggers alert; 5% week over week triggers watch.",
+      "spikeThresholdPercent": 0.10,
+      "weekOverWeekThreshold": 0.05,
+      "trailingMedianDays": 30,
+      "volatilityWindowDays": 90
+    },
+    "salesPace": {
+      "_comment": "15% below pace is yellow; 25% below pace is red; 20% above is notable.",
+      "belowPaceYellow": 0.15,
+      "belowPaceRed": 0.25,
+      "abovePaceNotable": 0.20,
+      "trailingWeekdayCount": 4,
+      "checkHours": [10, 13, 16]
+    },
+    "labor": {
+      "laborPercentYellow": 0.33,
+      "laborPercentRed": 0.38,
+      "overtimeHoursThreshold": 4
+    },
+    "discountCompVoid": {
+      "_comment": "Thresholds as percent of net sales.",
+      "discountPercentYellow": 0.05,
+      "discountPercentRed": 0.10,
+      "voidPercentYellow": 0.02,
+      "voidPercentRed": 0.05,
+      "compPercentYellow": 0.03,
+      "compPercentRed": 0.05,
+      "refundPercentYellow": 0.02,
+      "refundPercentRed": 0.04,
+      "totalExceptionPercentYellow": 0.05,
+      "totalExceptionPercentRed": 0.08,
+      "trailingSpikeMultiplier": 2.0
+    },
+    "stockout": {
+      "highMarginThreshold": 0.70,
+      "highVelocityMinDaily": 15,
+      "revenueLossAlertThreshold": 50
+    }
+  },
+  "cooldowns": {
+    "_comment": "Cooldown windows in minutes per rule. Prevents duplicate alerts within the window.",
+    "readiness": 720,
+    "primeCost": 1440,
+    "itemMargin": 10080,
+    "vendorPrice": 1440,
+    "salesPace": 240,
+    "labor": 480,
+    "discountCompVoid": 1440,
+    "stockout": 240
+  },
+  "ownerDefaults": {
+    "_comment": "Default owners for each rule category. Use Teams user principal names or display names.",
+    "readiness": "manager",
+    "primeCost": "manager",
+    "itemMargin": "manager",
+    "vendorPrice": "manager",
+    "salesPace": "shift_lead",
+    "labor": "manager",
+    "discountCompVoid": "manager",
+    "stockout": "shift_lead"
+  },
+  "watchlists": {
+    "_comment": "Populate with actual item names or IDs after first data pull.",
+    "keyIngredients": [
+      "espresso beans",
+      "whole milk",
+      "oat milk",
+      "flour tortillas",
+      "eggs",
+      "bacon",
+      "sausage",
+      "cheese",
+      "avocado",
+      "vanilla syrup",
+      "caramel syrup",
+      "chocolate syrup",
+      "cups (16oz)",
+      "cups (20oz)",
+      "lids"
+    ],
+    "keyMenuItems": [],
+    "keyVendors": []
+  },
+  "categoryTargets": {
+    "_comment": "Override per category COGS and margin targets. Keys should match MarginEdge category names.",
+    "Food": {
+      "cogsTarget": 0.32,
+      "marginTarget": 0.68
+    },
+    "N/A Bev": {
+      "cogsTarget": 0.25,
+      "marginTarget": 0.75
+    }
+  }
+}

@@ -89,4 +89,5 @@ export const CHANNEL_NAMES = {
   FINANCE: "finance",
   OPS_CONTROL: "ops",
   MARKETING: "marketplace",
+  SHADOW_PILOT: "shadow-pilot",
 } as const;

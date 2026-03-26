@@ -38,6 +38,8 @@ export interface BotConfig {
   largeOrderItems: number;
   highVoidCount: number;
   longOpenMinutes: number;
+  // MarginEdge MCP
+  marginedgeMcpUrl: string | undefined;
   // Intelligence thresholds
   dtOutlierMultiplier: number;
   dtTrendThreshold: number;
@@ -89,6 +91,7 @@ export function loadConfig(): BotConfig {
     logLevel: env.LOG_LEVEL ?? "info",
     openaiApiKey: openaiApiKey!,
     openaiModel: env.OPENAI_MODEL ?? "gpt-4o",
+    marginedgeMcpUrl: env.MARGINEDGE_MCP_URL,
     timezone: env.TIMEZONE ?? "America/Chicago",
     adminGroupId: env.ADMIN_GROUP_ID,
     managerGroupId: env.MANAGER_GROUP_ID,
