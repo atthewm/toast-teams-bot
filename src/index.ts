@@ -413,6 +413,25 @@ app.on("activity", async ({ activity, send, next }) => {
         return;
       }
 
+      // Control Tower: run all rules on demand and post to this channel
+      if (lower === "test tower" || lower === "test control tower" || lower === "test control-tower") {
+        await sendCard(send, simpleMessageCard("Control Tower", "Running all control tower rules..."));
+        try {
+          const { runControlTowerNow } = await import("./control-tower/scheduler.js");
+          const results = await runControlTowerNow();
+          if (results.length === 0) {
+            await sendCard(send, simpleMessageCard("Control Tower", "All rules evaluated. No alerts fired.", "Good"));
+          } else {
+            for (const msg of results) {
+              await send(msg);
+            }
+          }
+        } catch (err) {
+          await sendCard(send, errorCard("Control Tower Error", (err as Error).message.slice(0, 300)));
+        }
+        return;
+      }
+
       // Reset alerts: clear persisted alert state
       if (lower === "reset alerts") {
         resetAlertState();

@@ -304,4 +304,49 @@ export function startControlTowerScheduler(
   console.log(`${PREFIX} Scheduled: weekly exec summary at ${schedules.weeklyExecSummary}`);
 
   console.log(`${PREFIX} All control tower jobs registered. All alerts route to #${pilotChannel}.`);
+
+  // Store references for on demand execution
+  _runState = { engine, toastMcp, marginedgeMcp, ctConfig, timezone, botConfig };
+}
+
+/* ------------------------------------------------------------------ */
+/*  On demand execution (for "test tower" command)                     */
+/* ------------------------------------------------------------------ */
+
+let _runState: {
+  engine: ControlTowerEngine;
+  toastMcp: ToastMcpClient;
+  marginedgeMcp: ToastMcpClient | null;
+  ctConfig: ControlTowerConfig;
+  timezone: string;
+  botConfig: BotConfig;
+} | null = null;
+
+/**
+ * Run all control tower rules right now and return formatted messages.
+ * Does NOT post to any channel; the caller decides where to send them.
+ */
+export async function runControlTowerNow(): Promise<string[]> {
+  if (!_runState) {
+    return ["Control Tower has not been initialized. Restart the bot to initialize."];
+  }
+
+  const { engine, toastMcp, marginedgeMcp, ctConfig, timezone, botConfig } = _runState;
+  const ctx = buildContext(toastMcp, marginedgeMcp, ctConfig, timezone);
+  const alerts = await engine.run(ctx);
+
+  console.log(`${PREFIX} On demand run: ${alerts.length} alert(s) fired.`);
+
+  if (alerts.length === 0) {
+    return ["🟢 **Control Tower**: All rules evaluated. No alerts fired."];
+  }
+
+  const messages: string[] = [];
+  for (const alert of alerts) {
+    const msg = await formatAlertMessage(alert, botConfig);
+    logAlert(alert);
+    messages.push(msg);
+  }
+
+  return messages;
 }
