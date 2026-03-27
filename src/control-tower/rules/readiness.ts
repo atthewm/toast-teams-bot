@@ -67,7 +67,7 @@ export class ReadinessRule implements RuleHandler {
       try {
         const invoices = await ctx.marginedgeMcp.callToolJson<{ orders?: unknown[] }>(
           'marginedge_list_orders',
-          { startDate: ctx.yesterdayStr, endDate: ctx.yesterdayStr }
+          { startDate: ctx.yesterdayIso, endDate: ctx.yesterdayIso }
         );
         const orderCount = invoices?.orders?.length ?? 0;
         if (orderCount > 0) {

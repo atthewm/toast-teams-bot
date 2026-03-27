@@ -33,8 +33,10 @@ export interface RuleContext {
   marginedgeMcp: ToastMcpClient | null;
   config: ControlTowerConfig;
   timezone: string;
-  todayStr: string;       // YYYYMMDD
-  yesterdayStr: string;    // YYYYMMDD
+  todayStr: string;            // YYYYMMDD (for Toast)
+  yesterdayStr: string;        // YYYYMMDD (for Toast)
+  todayIso: string;            // YYYY-MM-DD (for MarginEdge)
+  yesterdayIso: string;        // YYYY-MM-DD (for MarginEdge)
 }
 
 /* ------------------------------------------------------------------ */

@@ -18,7 +18,9 @@ import type { Severity } from '../models.js';
 interface MenuGroup {
   name?: string;
   subgroups?: MenuGroup[];
+  menuGroups?: MenuGroup[];
   items?: MenuItem[];
+  menuItems?: MenuItem[];
 }
 
 interface MenuItem {
@@ -63,11 +65,11 @@ function normalizeName(raw: string): string {
 function flattenMenuItems(groups: MenuGroup[]): MenuItem[] {
   const items: MenuItem[] = [];
   for (const group of groups) {
-    if (group.items) {
-      items.push(...group.items);
-    }
-    if (group.subgroups) {
-      items.push(...flattenMenuItems(group.subgroups));
+    const groupItems = group.items ?? group.menuItems ?? [];
+    items.push(...groupItems);
+    const subgroups = group.subgroups ?? group.menuGroups ?? [];
+    if (subgroups.length > 0) {
+      items.push(...flattenMenuItems(subgroups));
     }
   }
   return items;
@@ -99,14 +101,27 @@ export class ItemMarginRule implements RuleHandler {
     const thresholds = ctx.config.thresholds.itemMargin;
 
     /* 1. Fetch Toast menu */
+    /* toast_get_menu returns an array of menu objects, each with groups */
+    type MenuEnvelope = { menus?: MenuObj[]; groups?: MenuGroup[] } | MenuObj[];
+    interface MenuObj { name?: string; guid?: string; groups?: MenuGroup[]; menuGroups?: MenuGroup[] }
     let menuItems: MenuItem[] = [];
     try {
-      const menuData = await ctx.toastMcp.callToolJson<{ menus?: MenuGroup[]; groups?: MenuGroup[] }>(
-        'toast_get_menu',
-        {}
-      );
-      const groups = menuData?.menus ?? menuData?.groups ?? [];
-      menuItems = flattenMenuItems(groups);
+      const raw = await ctx.toastMcp.callToolJson<MenuEnvelope>('toast_get_menu', {});
+      let allGroups: MenuGroup[] = [];
+      if (Array.isArray(raw)) {
+        for (const menu of raw) {
+          allGroups.push(...(menu.groups ?? menu.menuGroups ?? []));
+        }
+      } else if (raw) {
+        const menus = raw.menus ?? [];
+        for (const menu of menus) {
+          allGroups.push(...(menu.groups ?? menu.menuGroups ?? []));
+        }
+        if (raw.groups) {
+          allGroups.push(...raw.groups);
+        }
+      }
+      menuItems = flattenMenuItems(allGroups);
     } catch (err) {
       console.log(`[ControlTower] ItemMargin: Toast menu fetch error: ${(err as Error).message}`);
       return { ...nonFiring, note: 'Failed to fetch Toast menu data.' };

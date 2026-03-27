@@ -19,7 +19,9 @@ interface MenuGroup {
   name?: string;
   visibility?: string;
   subgroups?: MenuGroup[];
+  menuGroups?: MenuGroup[];
   items?: MenuItem[];
+  menuItems?: MenuItem[];
 }
 
 interface MenuItem {
@@ -85,11 +87,11 @@ function flattenItems(groups: MenuGroup[]): MenuItem[] {
       const lower = group.visibility.toLowerCase();
       if (lower === 'hidden' || lower === 'none') continue;
     }
-    if (group.items) {
-      items.push(...group.items);
-    }
-    if (group.subgroups) {
-      items.push(...flattenItems(group.subgroups));
+    const groupItems = group.items ?? group.menuItems ?? [];
+    items.push(...groupItems);
+    const subgroups = group.subgroups ?? group.menuGroups ?? [];
+    if (subgroups.length > 0) {
+      items.push(...flattenItems(subgroups));
     }
   }
   return items;
@@ -109,12 +111,28 @@ export class StockoutRule implements RuleHandler {
 
     try {
       /* 1. Fetch full menu */
-      const menuData = await ctx.toastMcp.callToolJson<{ menus?: MenuGroup[]; groups?: MenuGroup[] }>(
-        'toast_get_menu',
-        {}
-      );
-      const groups = menuData?.menus ?? menuData?.groups ?? [];
-      const allItems = flattenItems(groups);
+      /* toast_get_menu returns an array of menu objects, each with groups */
+      type MenuEnvelope = { menus?: MenuObj[]; groups?: MenuGroup[] } | MenuObj[];
+      interface MenuObj { name?: string; guid?: string; groups?: MenuGroup[]; menuGroups?: MenuGroup[] }
+      const raw = await ctx.toastMcp.callToolJson<MenuEnvelope>('toast_get_menu', {});
+
+      let allGroups: MenuGroup[] = [];
+      if (Array.isArray(raw)) {
+        /* Array of menu objects */
+        for (const menu of raw) {
+          allGroups.push(...(menu.groups ?? menu.menuGroups ?? []));
+        }
+      } else if (raw) {
+        /* Wrapped in { menus: [...] } or { groups: [...] } */
+        const menus = raw.menus ?? [];
+        for (const menu of menus) {
+          allGroups.push(...(menu.groups ?? menu.menuGroups ?? []));
+        }
+        if (raw.groups) {
+          allGroups.push(...raw.groups);
+        }
+      }
+      const allItems = flattenItems(allGroups);
 
       if (allItems.length === 0) {
         return { ...nonFiring, note: 'No menu items found. Skipping stockout check.' };

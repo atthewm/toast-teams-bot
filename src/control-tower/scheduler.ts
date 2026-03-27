@@ -69,42 +69,26 @@ async function sendToChannel(
 }
 
 /**
- * Get today's YYYYMMDD string in the configured timezone.
+ * Parse date parts in the configured timezone.
  */
-function todayStr(tz: string): string {
+function dateParts(date: Date, tz: string): { y: string; m: string; d: string } {
   const formatter = new Intl.DateTimeFormat("en-US", {
     timeZone: tz,
     year: "numeric",
     month: "2-digit",
     day: "2-digit",
   });
-  const parts = formatter.formatToParts(new Date());
-  const y = parts.find((p) => p.type === "year")!.value;
-  const m = parts.find((p) => p.type === "month")!.value;
-  const d = parts.find((p) => p.type === "day")!.value;
-  return `${y}${m}${d}`;
-}
-
-/**
- * Get yesterday's YYYYMMDD string in the configured timezone.
- */
-function yesterdayStr(tz: string): string {
-  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
-  const formatter = new Intl.DateTimeFormat("en-US", {
-    timeZone: tz,
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  });
-  const parts = formatter.formatToParts(yesterday);
-  const y = parts.find((p) => p.type === "year")!.value;
-  const m = parts.find((p) => p.type === "month")!.value;
-  const d = parts.find((p) => p.type === "day")!.value;
-  return `${y}${m}${d}`;
+  const parts = formatter.formatToParts(date);
+  return {
+    y: parts.find((p) => p.type === "year")!.value,
+    m: parts.find((p) => p.type === "month")!.value,
+    d: parts.find((p) => p.type === "day")!.value,
+  };
 }
 
 /**
  * Build a RuleContext for the current moment.
+ * Provides both YYYYMMDD (Toast) and YYYY-MM-DD (MarginEdge) date formats.
  */
 function buildContext(
   toastMcp: ToastMcpClient,
@@ -112,13 +96,20 @@ function buildContext(
   ctConfig: ControlTowerConfig,
   timezone: string
 ): RuleContext {
+  const now = new Date();
+  const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  const tp = dateParts(now, timezone);
+  const yp = dateParts(yesterday, timezone);
+
   return {
     toastMcp,
     marginedgeMcp,
     config: ctConfig,
     timezone,
-    todayStr: todayStr(timezone),
-    yesterdayStr: yesterdayStr(timezone),
+    todayStr: `${tp.y}${tp.m}${tp.d}`,
+    yesterdayStr: `${yp.y}${yp.m}${yp.d}`,
+    todayIso: `${tp.y}-${tp.m}-${tp.d}`,
+    yesterdayIso: `${yp.y}-${yp.m}-${yp.d}`,
   };
 }
 

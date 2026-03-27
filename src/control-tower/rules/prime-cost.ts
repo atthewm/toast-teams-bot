@@ -127,7 +127,7 @@ export class PrimeCostRule implements RuleHandler {
         try {
           const invoicesData = await ctx.marginedgeMcp.callToolJson<{ orders?: InvoiceEntry[] }>(
             'marginedge_list_orders',
-            { startDate: ctx.yesterdayStr, endDate: ctx.yesterdayStr }
+            { startDate: ctx.yesterdayIso, endDate: ctx.yesterdayIso }
           );
           const invoices = invoicesData?.orders ?? [];
           cogs = extractCogs(invoices);
