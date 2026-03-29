@@ -585,6 +585,28 @@ export async function endOfDaySummary(
     text += `\n**Drive-Thru**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders ${status}\n`;
   }
 
+  // Labor
+  if (todaySummary.labor) {
+    const lb = todaySummary.labor;
+    const laborPct = (lb.laborPercent * 100).toFixed(1);
+    const laborTarget = 30; // percent
+    const laborStatus = lb.laborPercent * 100 <= laborTarget ? "ON TARGET" : `**${(lb.laborPercent * 100 - laborTarget).toFixed(1)}% OVER**`;
+
+    text += `\n**Labor**: ${formatDollars(lb.totalLaborCost)} (${laborPct}% of sales) ${laborStatus}\n`;
+    text += `Hours: ${lb.totalHours.toFixed(1)} total`;
+    if (lb.overtimeHours > 0) text += ` (${lb.overtimeHours.toFixed(1)} OT)`;
+    text += `, ${lb.employeesWorked} employees\n`;
+    text += `Tips: ${formatDollars(lb.totalTips)}\n`;
+
+    // Historical comparison
+    if (prev?.labor) {
+      text += `vs Yesterday: Labor ${pctStr(lb.totalLaborCost, prev.labor.totalLaborCost)}, Hours ${pctStr(lb.totalHours, prev.labor.totalHours)}\n`;
+    }
+    if (lastWeek?.labor) {
+      text += `vs Last ${dayName}: Labor ${pctStr(lb.totalLaborCost, lastWeek.labor.totalLaborCost)}, Hours ${pctStr(lb.totalHours, lastWeek.labor.totalHours)}\n`;
+    }
+  }
+
   // Intelligence layer
   const insights = analyzeEndOfDay({
     summary: todaySummary,

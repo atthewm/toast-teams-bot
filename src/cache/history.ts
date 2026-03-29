@@ -30,6 +30,16 @@ export interface DailyDriveThru {
   avgSeconds: number;
 }
 
+export interface DailyLabor {
+  totalHours: number;
+  regularHours: number;
+  overtimeHours: number;
+  totalLaborCost: number;
+  totalTips: number;
+  employeesWorked: number;
+  laborPercent: number; // labor cost / totalSales, as decimal
+}
+
 export interface DailySummary {
   date: string; // YYYYMMDD
   dayOfWeek: number; // 0=Sun .. 6=Sat
@@ -44,6 +54,7 @@ export interface DailySummary {
   peakHour: number;
   peakHourOrders: number;
   driveThru: DailyDriveThru | null;
+  labor: DailyLabor | null;
 }
 
 const HISTORY_DIR = process.env.HISTORY_DIR ?? resolve(process.cwd(), "data", "history");
@@ -296,6 +307,39 @@ export async function buildDailySummary(
     }
   }
 
+  // Labor data from Toast
+  let labor: DailyLabor | null = null;
+  try {
+    const laborRaw = await mcp.callToolText("toast_list_shifts", { businessDate: dateStr });
+    let laborData: {
+      laborSummary?: {
+        totalRegularHours?: number;
+        totalOvertimeHours?: number;
+        totalHours?: number;
+        totalLaborCost?: number;
+        totalTips?: number;
+        employeesWorked?: number;
+      };
+    } | null = null;
+    try { laborData = JSON.parse(laborRaw); } catch { /* */ }
+
+    if (laborData?.laborSummary) {
+      const ls = laborData.laborSummary;
+      const totalLaborCost = ls.totalLaborCost ?? 0;
+      labor = {
+        totalHours: ls.totalHours ?? 0,
+        regularHours: ls.totalRegularHours ?? 0,
+        overtimeHours: ls.totalOvertimeHours ?? 0,
+        totalLaborCost,
+        totalTips: ls.totalTips ?? 0,
+        employeesWorked: ls.employeesWorked ?? 0,
+        laborPercent: totalSales > 0 ? Math.round((totalLaborCost / totalSales) * 10000) / 10000 : 0,
+      };
+    }
+  } catch (err) {
+    console.log(`[History] Labor fetch failed for ${dateStr}: ${(err as Error).message}`);
+  }
+
   const d = parseDate(dateStr);
 
   return {
@@ -312,6 +356,7 @@ export async function buildDailySummary(
     peakHour,
     peakHourOrders,
     driveThru,
+    labor,
   };
 }
 
