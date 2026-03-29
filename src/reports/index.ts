@@ -75,14 +75,6 @@ function dayOfWeekInTz(tz: string, offsetDays = 0): number {
   return map[wd] ?? 0;
 }
 
-/** Format YYYYMMDD for Toast API (legacy, used by shift roster) */
-function businessDate(date: Date): string {
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, "0");
-  const d = String(date.getDate()).padStart(2, "0");
-  return `${y}${m}${d}`;
-}
-
 /** Get the hour (0..23) of an ISO date string in a given timezone. */
 function getHourInTimezone(isoDate: string, tz: string): number {
   return parseInt(
@@ -619,11 +611,14 @@ export async function endOfDaySummary(
 }
 
 /**
- * Shift roster (placeholder until toast_list_shifts is added).
+ * Shift roster: who's scheduled, who's clocked in, labor cost summary.
  */
-export async function shiftRoster(mcp: ToastMcpClient): Promise<string> {
-  const today = new Date();
-  const display = `${today.getMonth() + 1}/${today.getDate()}/${today.getFullYear()}`;
+export async function shiftRoster(
+  mcp: ToastMcpClient,
+  timezone = DEFAULT_TZ
+): Promise<string> {
+  const dateStr = businessDateInTz(timezone);
+  const display = displayDateInTz(timezone);
 
   const tools = mcp.getTools();
   const hasLabor = tools.some((t) => t.name.includes("labor") || t.name.includes("shift"));
@@ -631,17 +626,113 @@ export async function shiftRoster(mcp: ToastMcpClient): Promise<string> {
   if (!hasLabor) {
     return (
       `**Shift Roster** (${display})\n\n` +
-      `Labor tools not yet available on the MCP server. ` +
-      `Add toast_list_shifts to enable this report.`
+      `Labor tools not yet available on the MCP server.`
     );
   }
 
   try {
-    const raw = await mcp.callToolText("toast_list_shifts", { businessDate: businessDate(today) });
-    return `**Shift Roster** (${display})\n\n${raw}`;
+    const raw = await mcp.callToolText("toast_list_shifts", { businessDate: dateStr });
+
+    let data: ShiftData | null = null;
+    try { data = JSON.parse(raw); } catch { /* */ }
+
+    if (!data) {
+      return `**Shift Roster** (${display})\n\nInvalid response from Toast labor API.`;
+    }
+
+    let text = `**Shift Roster** (${display})\n\n`;
+
+    // Scheduled shifts
+    const scheduled = data.scheduled?.shifts ?? [];
+    if (scheduled.length > 0) {
+      text += `**Scheduled** (${scheduled.length}):\n`;
+      for (const s of scheduled) {
+        const inTime = s.scheduledIn ? formatTimeInTz(s.scheduledIn, timezone) : "?";
+        const outTime = s.scheduledOut ? formatTimeInTz(s.scheduledOut, timezone) : "?";
+        text += `${s.employee} (${s.job}): ${inTime} to ${outTime}\n`;
+      }
+    } else {
+      text += `**Scheduled**: No shifts scheduled\n`;
+    }
+
+    // Actual time entries
+    const entries = data.actual?.timeEntries ?? [];
+    if (entries.length > 0) {
+      text += `\n**Clocked In** (${entries.length}):\n`;
+      for (const t of entries) {
+        const inTime = t.clockIn ? formatTimeInTz(t.clockIn, timezone) : "?";
+        const outTime = t.clockOut ? formatTimeInTz(t.clockOut, timezone) : "still in";
+        const hours = (t.regularHours ?? 0) + (t.overtimeHours ?? 0);
+        const hoursStr = hours > 0 ? ` ${hours.toFixed(1)}h` : "";
+        const otStr = (t.overtimeHours ?? 0) > 0 ? ` (${t.overtimeHours?.toFixed(1)}h OT)` : "";
+        text += `${t.employee} (${t.job}): ${inTime} to ${outTime}${hoursStr}${otStr}\n`;
+      }
+    }
+
+    // Labor summary
+    const summary = data.laborSummary;
+    if (summary) {
+      text += `\n**Labor Summary**:\n`;
+      text += `Total Hours: ${summary.totalHours?.toFixed(1) ?? 0}`;
+      if ((summary.totalOvertimeHours ?? 0) > 0) {
+        text += ` (${summary.totalOvertimeHours?.toFixed(1)} OT)`;
+      }
+      text += `\n`;
+      text += `Labor Cost: ${formatDollars(summary.totalLaborCost)}\n`;
+      text += `Tips: ${formatDollars(summary.totalTips)}\n`;
+    }
+
+    return text;
   } catch (err) {
-    return `**Shift Roster** (${display})\n\nFailed: ${(err as Error).message}`;
+    return `**Shift Roster** (${display})\n\nFailed to fetch: ${(err as Error).message}`;
   }
+}
+
+// ---- Labor data types ----
+
+interface ShiftData {
+  businessDate?: string;
+  scheduled?: {
+    count?: number;
+    shifts?: Array<{
+      employee?: string;
+      job?: string;
+      scheduledIn?: string;
+      scheduledOut?: string;
+    }>;
+  };
+  actual?: {
+    count?: number;
+    timeEntries?: Array<{
+      employee?: string;
+      job?: string;
+      clockIn?: string;
+      clockOut?: string;
+      regularHours?: number;
+      overtimeHours?: number;
+      laborCost?: number;
+      tips?: number;
+      sales?: number;
+    }>;
+  };
+  laborSummary?: {
+    totalRegularHours?: number;
+    totalOvertimeHours?: number;
+    totalHours?: number;
+    totalLaborCost?: number;
+    totalTips?: number;
+    employeesWorked?: number;
+  };
+}
+
+/** Format an ISO timestamp as h:mm AM/PM in the given timezone. */
+function formatTimeInTz(isoDate: string, tz: string): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: tz,
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(new Date(isoDate));
 }
 
 /**

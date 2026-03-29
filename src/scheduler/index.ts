@@ -117,13 +117,13 @@ function buildShiftPerformanceMessage(
     0
   );
   const teamOrders = servers.reduce((s, srv) => s + srv.dtOrders, 0);
-  const teamAvg = teamOrders > 0 ? Math.round(teamTotal / teamOrders) : 90;
+  const teamAvg = teamOrders > 0 ? Math.round(teamTotal / teamOrders) : 150;
 
   return formatShiftPerformance(
     getCurrentTimeStr(tz),
     servers,
     teamAvg,
-    90
+    150
   );
 }
 
@@ -167,7 +167,7 @@ export function startScheduler(
   cron.schedule(
     "0 6 * * *",
     async () => {
-      const report = await shiftRoster(mcp);
+      const report = await shiftRoster(mcp, timezone);
       await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, report);
     },
     opts
