@@ -19,6 +19,13 @@ import {
   endOfDaySummary,
 } from "../reports/index.js";
 import { pollAlerts } from "../alerts/monitor.js";
+import { formatMorningForecast } from "../alerts/weather.js";
+import {
+  checkLaborBreach,
+  checkProjectedMiss,
+  checkMissedClockOuts,
+} from "../alerts/labor-realtime.js";
+import { buildCheckpoint } from "../alerts/checkpoint.js";
 import {
   loadHistory,
   buildDailySummary,
@@ -173,6 +180,25 @@ export function startScheduler(
     opts
   );
 
+  // --- 6:00 AM: Morning weather forecast → #ops (if available) ---
+  cron.schedule(
+    "0 6 * * *",
+    async () => {
+      try {
+        const forecast = await formatMorningForecast();
+        if (forecast) {
+          await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, forecast);
+        }
+      } catch (err) {
+        console.log(
+          "[Scheduler] Weather forecast error:",
+          (err as Error).message
+        );
+      }
+    },
+    opts
+  );
+
   // --- 7:00 AM: Marketplace breakdown → #marketplace ---
   cron.schedule(
     "0 7 * * *",
@@ -242,18 +268,21 @@ export function startScheduler(
     opts
   );
 
-  // --- 10:30 AM: Morning rush recap → #ops ---
+  // --- 10:30 AM: Morning checkpoint (rush recap + labor + weather) → #ops ---
   cron.schedule(
     "30 10 * * *",
     async () => {
-      const report = await rushRecap(
-        mcp,
-        "Morning Rush Recap",
-        6,
-        10,
-        timezone
-      );
-      await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, report);
+      try {
+        const report = config
+          ? await buildCheckpoint(mcp, "Morning Checkpoint", 6, 10, timezone, config)
+          : await rushRecap(mcp, "Morning Rush Recap", 6, 10, timezone);
+        await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, report);
+      } catch (err) {
+        console.log(
+          "[Scheduler] Morning checkpoint error:",
+          (err as Error).message
+        );
+      }
     },
     opts
   );
@@ -280,18 +309,66 @@ export function startScheduler(
     opts
   );
 
-  // --- 2:30 PM: Lunch rush recap → #ops ---
+  // --- Hourly 11 AM to 6 PM: Labor breach check → #ops + #finance ---
+  if (config) {
+    cron.schedule(
+      "0 11-18 * * *",
+      async () => {
+        try {
+          const dateStr = todayInTz(timezone);
+          const alert = await checkLaborBreach(mcp, dateStr, timezone, config);
+          if (alert) {
+            await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, alert);
+            await sendToChannel(app, CHANNEL_NAMES.FINANCE, alert);
+          }
+        } catch (err) {
+          console.log(
+            "[Scheduler] Labor breach check error:",
+            (err as Error).message
+          );
+        }
+      },
+      opts
+    );
+  }
+
+  // --- 12:00 PM: Projected daily miss → #finance ---
+  if (config) {
+    cron.schedule(
+      "0 12 * * *",
+      async () => {
+        try {
+          const dateStr = todayInTz(timezone);
+          const alert = await checkProjectedMiss(mcp, dateStr, timezone, config);
+          if (alert) {
+            await sendToChannel(app, CHANNEL_NAMES.FINANCE, alert);
+          }
+        } catch (err) {
+          console.log(
+            "[Scheduler] Projected miss check error:",
+            (err as Error).message
+          );
+        }
+      },
+      opts
+    );
+  }
+
+  // --- 2:30 PM: Afternoon checkpoint (lunch recap + labor + weather) → #ops ---
   cron.schedule(
     "30 14 * * *",
     async () => {
-      const report = await rushRecap(
-        mcp,
-        "Lunch Rush Recap",
-        11,
-        14,
-        timezone
-      );
-      await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, report);
+      try {
+        const report = config
+          ? await buildCheckpoint(mcp, "Afternoon Checkpoint", 11, 14, timezone, config)
+          : await rushRecap(mcp, "Lunch Rush Recap", 11, 14, timezone);
+        await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, report);
+      } catch (err) {
+        console.log(
+          "[Scheduler] Afternoon checkpoint error:",
+          (err as Error).message
+        );
+      }
     },
     opts
   );
@@ -348,6 +425,26 @@ export function startScheduler(
       } catch (err) {
         console.log(
           `[Scheduler] EOD summary error: ${(err as Error).message}`
+        );
+      }
+    },
+    opts
+  );
+
+  // --- 7:00 PM: Missed clock out check → #ops ---
+  cron.schedule(
+    "0 19 * * *",
+    async () => {
+      try {
+        const dateStr = todayInTz(timezone);
+        const alert = await checkMissedClockOuts(mcp, dateStr, timezone);
+        if (alert) {
+          await sendToChannel(app, CHANNEL_NAMES.OPS_CONTROL, alert);
+        }
+      } catch (err) {
+        console.log(
+          "[Scheduler] Missed clock out check error:",
+          (err as Error).message
         );
       }
     },
@@ -457,15 +554,21 @@ export function startScheduler(
   console.log("  5:00 AM  Daily reset (clear state)");
   console.log("  6:00 AM  Daily sales summary → #finance");
   console.log("  6:00 AM  Shift roster → #ops");
+  console.log("  6:00 AM  Morning weather forecast → #ops");
   console.log("  7:00 AM  Marketplace breakdown → #marketplace");
   console.log("  Hourly   Pulse (7 AM to 6 PM, deviation > 15%) → #ops");
-  console.log("  10:30 AM Morning rush recap → #ops");
+  console.log("  10:30 AM Morning checkpoint (rush + labor + weather) → #ops");
   console.log("  11:00 AM Shift performance → #ops");
-  console.log("  2:30 PM  Lunch rush recap → #ops");
+  if (config) {
+    console.log("  Hourly   Labor breach check (11 AM to 6 PM) → #ops + #finance");
+    console.log("  12:00 PM Projected daily miss → #finance");
+  }
+  console.log("  2:30 PM  Afternoon checkpoint (rush + labor + weather) → #ops");
   console.log("  3:00 PM  Shift performance → #ops");
   console.log(
     "  6:30 PM  Afternoon recap + Shift perf + EOD Summary → #ops + #finance"
   );
+  console.log("  7:00 PM  Missed clock out check → #ops");
   console.log("  Every 5m 86'd item check → #ops");
   if (config) {
     console.log(

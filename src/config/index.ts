@@ -53,6 +53,9 @@ export interface BotConfig {
   hourlyPulseDeviation: number;
   shiftPerfMinOrders: number;
   rollingWindowMinutes: number;
+  // Labor and projection thresholds
+  laborBreachPercent: number;
+  projectedMissPercent: number;
 }
 
 export function loadConfig(): BotConfig {
@@ -111,5 +114,7 @@ export function loadConfig(): BotConfig {
     hourlyPulseDeviation: parseFloat(env.HOURLY_PULSE_DEVIATION ?? "0.15"),
     shiftPerfMinOrders: parseInt(env.SHIFT_PERF_MIN_ORDERS ?? "5", 10),
     rollingWindowMinutes: parseInt(env.ROLLING_WINDOW_MINUTES ?? "30", 10),
+    laborBreachPercent: parseFloat(env.LABOR_BREACH_PERCENT ?? "0.35"),
+    projectedMissPercent: parseFloat(env.PROJECTED_MISS_PERCENT ?? "0.25"),
   };
 }
