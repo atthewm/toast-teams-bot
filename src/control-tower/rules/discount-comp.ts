@@ -72,7 +72,7 @@ export class DiscountCompRule implements RuleHandler {
       /* 1. Fetch yesterday's orders */
       const ordersData = await ctx.toastMcp.callToolJson<{ orders?: OrderEntry[]; totalOrders?: number }>(
         'toast_list_orders',
-        { businessDate: ctx.yesterdayStr }
+        { businessDate: ctx.yesterdayStr, fetchAll: true }
       );
       const orders = ordersData?.orders ?? [];
 

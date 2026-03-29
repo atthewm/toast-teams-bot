@@ -74,7 +74,7 @@ export class SalesPaceRule implements RuleHandler {
       /* 1. Fetch today's orders */
       const ordersData = await ctx.toastMcp.callToolJson<{ orders?: OrderEntry[]; totalOrders?: number }>(
         'toast_list_orders',
-        { businessDate: ctx.todayStr }
+        { businessDate: ctx.todayStr, fetchAll: true }
       );
       const orders = ordersData?.orders ?? [];
       const valid = orders.filter(o => !o.voided && !o.deleted);

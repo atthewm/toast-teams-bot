@@ -28,6 +28,10 @@ export class ToastMcpClient {
   ) {}
 
   async connect(): Promise<void> {
+    // Reset state for a fresh connection
+    this.sessionId = null;
+    this.initialized = false;
+
     const initResponse = await this.sendRequest({
       jsonrpc: "2.0",
       id: 1,
@@ -66,6 +70,13 @@ export class ToastMcpClient {
     );
   }
 
+  /** Reset connection state so the next callTool triggers a fresh connect. */
+  disconnect(): void {
+    this.sessionId = null;
+    this.initialized = false;
+    this.tools = [];
+  }
+
   async callTool(
     name: string,
     args: Record<string, unknown> = {}
@@ -74,6 +85,22 @@ export class ToastMcpClient {
       await this.connect();
     }
 
+    try {
+      return await this.callToolInner(name, args);
+    } catch (err) {
+      // On connection or session errors, reconnect once and retry
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[MCP] Tool call failed (${name}), reconnecting: ${msg}`);
+      this.disconnect();
+      await this.connect();
+      return this.callToolInner(name, args);
+    }
+  }
+
+  private async callToolInner(
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<McpToolResult> {
     const response = await this.sendRequest({
       jsonrpc: "2.0",
       id: Date.now(),
@@ -151,11 +178,18 @@ export class ToastMcpClient {
       headers["Authorization"] = `Bearer ${this.apiKey}`;
     }
 
-    const response = await fetch(this.serverUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(payload),
-    });
+    let response: Response;
+    try {
+      response = await fetch(this.serverUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+    } catch (err) {
+      throw new Error(
+        `MCP server unreachable at ${this.serverUrl}: ${err instanceof Error ? err.message : String(err)}`
+      );
+    }
 
     const newSessionId = response.headers.get("mcp-session-id");
     if (newSessionId) {
@@ -164,6 +198,13 @@ export class ToastMcpClient {
 
     if (isNotification || response.status === 202) {
       return { sessionId: this.sessionId, data: null };
+    }
+
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      throw new Error(
+        `MCP server returned HTTP ${response.status}: ${errorBody.slice(0, 200)}`
+      );
     }
 
     const body = await response.text();

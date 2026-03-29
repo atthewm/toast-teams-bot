@@ -169,7 +169,7 @@ export async function buildDailySummary(
 ): Promise<DailySummary> {
   const raw = await mcp.callToolText("toast_list_orders", {
     businessDate: dateStr,
-    detailCount: 200,
+    fetchAll: true,
   });
 
   let data: {

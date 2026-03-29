@@ -184,14 +184,22 @@ export async function dailySalesSummary(
   try {
     const raw = await mcp.callToolText("toast_list_orders", {
       businessDate: dateStr,
-      detailCount: 200,
+      fetchAll: true,
     });
+
+    if (!raw) {
+      return `**Daily Sales Summary** (${display})\n\nFailed to connect to Toast MCP server. Check server status.`;
+    }
 
     let data: OrderResponse | null = null;
     try { data = JSON.parse(raw); } catch { /* */ }
 
-    if (!data || !data.totalOrders) {
-      return `**Daily Sales Summary** (${display})\n\nNo order data available for yesterday.`;
+    if (!data) {
+      return `**Daily Sales Summary** (${display})\n\nInvalid response from Toast MCP server.`;
+    }
+
+    if (!data.totalOrders) {
+      return `**Daily Sales Summary** (${display})\n\nNo orders recorded for yesterday.`;
     }
 
     const orders = data.orders ?? [];
@@ -231,8 +239,8 @@ export async function dailySalesSummary(
     // Drive-thru
     const dt = computeDriveThru(orders);
     if (dt) {
-      const status = dt.avgSeconds <= 90 ? "ON TARGET" : `**${dt.avgSeconds - 90}s OVER**`;
-      text += `\n**Drive-Thru**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders (target: 1:30) ${status}\n`;
+      const status = dt.avgSeconds <= 150 ? "ON TARGET" : `**${dt.avgSeconds - 150}s OVER**`;
+      text += `\n**Drive-Thru**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders (target: 2:30) ${status}\n`;
     }
 
     // Intelligence layer
@@ -292,14 +300,18 @@ export async function marketplaceBreakdown(
   try {
     const raw = await mcp.callToolText("toast_list_orders", {
       businessDate: dateStr,
-      detailCount: 200,
+      fetchAll: true,
     });
+
+    if (!raw) {
+      return `**Marketplace Breakdown** (${display})\n\nFailed to connect to Toast MCP server. Check server status.`;
+    }
 
     let data: OrderResponse | null = null;
     try { data = JSON.parse(raw); } catch { /* */ }
 
-    if (!data || !data.orders) {
-      return `**Marketplace Breakdown** (${display})\n\nNo order data available.`;
+    if (!data || !data.orders || data.orders.length === 0) {
+      return `**Marketplace Breakdown** (${display})\n\nNo orders recorded for this date.`;
     }
 
     const validOrders = data.orders.filter((o) => !o.voided);
@@ -389,14 +401,18 @@ export async function rushRecap(
   try {
     const raw = await mcp.callToolText("toast_list_orders", {
       businessDate: dateStr,
-      detailCount: 200,
+      fetchAll: true,
     });
+
+    if (!raw) {
+      return `**${label}** (${display})\n\nFailed to connect to Toast MCP server. Check server status.`;
+    }
 
     let data: OrderResponse | null = null;
     try { data = JSON.parse(raw); } catch { /* */ }
 
-    if (!data || !data.orders) {
-      return `**${label}** (${display})\n\nNo order data available.`;
+    if (!data || !data.orders || data.orders.length === 0) {
+      return `**${label}** (${display})\n\nNo orders recorded yet for today.`;
     }
 
     // Filter orders within the time window using timezone-aware hour
@@ -473,9 +489,8 @@ export async function rushRecap(
     // Drive-thru section (all day, not just rush window)
     const dt = computeDriveThru(data.orders);
     if (dt) {
-      const status = dt.avgSeconds <= 90 ? "ON TARGET" : `**${dt.avgSeconds - 90}s OVER**`;
+      const status = dt.avgSeconds <= 150 ? "ON TARGET" : `**${dt.avgSeconds - 150}s OVER**`;
       text += `\n**Drive-Thru Today**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders ${status}\n`;
-      text += `**Every order through in 1:30. That's the standard.**\n`;
     }
 
     // Intelligence
@@ -574,9 +589,8 @@ export async function endOfDaySummary(
   // Drive-thru
   if (todaySummary.driveThru) {
     const dt = todaySummary.driveThru;
-    const status = dt.avgSeconds <= 90 ? "ON TARGET" : `**${dt.avgSeconds - 90}s OVER**`;
+    const status = dt.avgSeconds <= 150 ? "ON TARGET" : `**${dt.avgSeconds - 150}s OVER**`;
     text += `\n**Drive-Thru**: ${formatTime(dt.avgSeconds)} avg across ${dt.count} orders ${status}\n`;
-    text += `**Every order through in 1:30. That's the standard.**\n`;
   }
 
   // Intelligence layer

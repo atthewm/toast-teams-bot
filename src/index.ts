@@ -67,8 +67,9 @@ function logToFile(msg: string) {
   try { appendFileSync(LOG_FILE, line); } catch { /* not on Azure */ }
 }
 import { createChatPrompt, getMemory } from "./ai/prompt.js";
-import { startScheduler } from "./scheduler/index.js";
-import { startControlTowerScheduler } from "./control-tower/scheduler.js";
+// Proactive posting disabled: remote-ops-engine owns all scheduled alerts.
+// import { startScheduler } from "./scheduler/index.js";
+// import { startControlTowerScheduler } from "./control-tower/scheduler.js";
 import {
   registerChannel,
   getAllChannels,
@@ -272,7 +273,7 @@ app.on("activity", async ({ activity, send, next }) => {
           }
           if (report === "drivethru" || report === "all") {
             const dateStr = todayDateStr(config.timezone);
-            const raw = await mcp.callToolText("toast_list_orders", { businessDate: dateStr, detailCount: 200 });
+            const raw = await mcp.callToolText("toast_list_orders", { businessDate: dateStr, fetchAll: true });
             let dtData: { orders?: Array<{ diningOptionName?: string; openedDate?: string; closedDate?: string; voided?: boolean; displayNumber?: string; guid?: string }> } | null = null;
             try { dtData = JSON.parse(raw); } catch { /* text */ }
             const DT = ["drive thru", "drive-thru", "drivethru", "drive through"];
@@ -300,13 +301,13 @@ app.on("activity", async ({ activity, send, next }) => {
               const avg = dtCount > 0 ? Math.round(dtTotal / dtCount) : 0;
               const avgM = Math.floor(avg / 60);
               const avgS = avg % 60;
-              const onTarget = avg <= 90;
-              const statusText = onTarget ? "ON TARGET" : `${avg - 90}s OVER`;
+              const onTarget = avg <= 150;
+              const statusText = onTarget ? "ON TARGET" : `${avg - 150}s OVER`;
               await sendCard(send, driveThruCard({
                 avgMinutes: avgM,
                 avgSeconds: avgS,
                 completedCount: dtCount,
-                target: "1:30",
+                target: "2:30",
                 statusText,
                 onTarget,
                 recentOrders: recentOrders.slice(-10),
@@ -376,8 +377,8 @@ app.on("activity", async ({ activity, send, next }) => {
               servers.sort((a, b) => a.dtAvg - b.dtAvg);
               const teamTotal = servers.reduce((s, srv) => s + srv.dtAvg * srv.dtOrders, 0);
               const teamOrders = servers.reduce((s, srv) => s + srv.dtOrders, 0);
-              const teamAvg = teamOrders > 0 ? Math.round(teamTotal / teamOrders) : 90;
-              await sendCard(send, reportCard("Shift Performance", formatShiftPerformance(getCurrentTimeStr(config.timezone), servers, teamAvg, 90)));
+              const teamAvg = teamOrders > 0 ? Math.round(teamTotal / teamOrders) : 150;
+              await sendCard(send, reportCard("Shift Performance", formatShiftPerformance(getCurrentTimeStr(config.timezone), servers, teamAvg, 150)));
             }
           }
           if (report === "stats") {
@@ -871,11 +872,11 @@ app.start(config.port).then(() => {
   log("AI:", config.openaiModel, "| Timezone:", config.timezone);
   log("MCP:", config.mcpServerUrl);
 
-  // Start the scheduler for automated reports and real-time alerts
-  startScheduler(app, mcp, config.timezone, config);
-
-  // Start the control tower scheduler (shadow mode, posts to #shadow-pilot)
-  startControlTowerScheduler(app, mcp, config.timezone, config);
+  // Proactive posting disabled. remote-ops-engine owns all scheduled alerts.
+  // The bot remains live for on-demand queries via Teams messages.
+  // startScheduler(app, mcp, config.timezone, config);
+  // startControlTowerScheduler(app, mcp, config.timezone, config);
+  console.log("[Bot] Proactive posting disabled. Use remote-ops-engine for scheduled alerts.");
 }).catch((err) => {
   log("Fatal:", err.message);
   process.exit(1);

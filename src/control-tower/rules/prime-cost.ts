@@ -103,7 +103,7 @@ export class PrimeCostRule implements RuleHandler {
       try {
         const ordersData = await ctx.toastMcp.callToolJson<{ orders?: OrderEntry[]; totalOrders?: number }>(
           'toast_list_orders',
-          { businessDate: ctx.yesterdayStr }
+          { businessDate: ctx.yesterdayStr, fetchAll: true }
         );
         const orders = ordersData?.orders ?? [];
         const salesInfo = extractNetSales(orders);

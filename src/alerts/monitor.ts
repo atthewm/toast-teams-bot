@@ -175,7 +175,7 @@ function checkDriveThruSpeed(
   orders: OrderSummary[],
   seenGuids: Set<string>
 ): { avgSeconds: number | null; count: number; alert: string | null } {
-  const TARGET_SECONDS = 90;
+  const TARGET_SECONDS = 150;
 
   const dtOrders = orders.filter((o) => {
     if (!o.diningOptionName || !o.openedDate || !o.closedDate || o.voided)
@@ -218,7 +218,7 @@ function checkDriveThruSpeed(
     const delta = avgSeconds - TARGET_SECONDS;
 
     let text = `**Drive Thru Speed Alert**\n\n`;
-    text += `Today's average: **${avgStr}** (target: 1:30, **${delta}s over**)\n`;
+    text += `Today's average: **${avgStr}** (target: 2:30, **${delta}s over**)\n`;
     text += `Completed drive thru orders today: **${counted}**\n\n`;
 
     if (slowOrders.length > 0) {
@@ -228,7 +228,6 @@ function checkDriveThruSpeed(
       }
     }
 
-    text += `\n**Every order through in 1:30. That's the standard.**`;
 
     return { avgSeconds, count: counted, alert: text };
   }
@@ -696,7 +695,7 @@ export async function pollAlerts(
     const dateStr = todayBusinessDate(config.timezone);
     const raw = await mcp.callToolText("toast_list_orders", {
       businessDate: dateStr,
-      detailCount: 200,
+      fetchAll: true,
     });
 
     let data: {
