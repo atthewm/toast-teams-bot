@@ -67,9 +67,7 @@ function logToFile(msg: string) {
   try { appendFileSync(LOG_FILE, line); } catch { /* not on Azure */ }
 }
 import { createChatPrompt, getMemory } from "./ai/prompt.js";
-// Proactive posting disabled: remote-ops-engine owns all scheduled alerts.
-// import { startScheduler } from "./scheduler/index.js";
-// import { startControlTowerScheduler } from "./control-tower/scheduler.js";
+import { startScheduler } from "./scheduler/index.js";
 import {
   registerChannel,
   getAllChannels,
@@ -872,11 +870,8 @@ app.start(config.port).then(() => {
   log("AI:", config.openaiModel, "| Timezone:", config.timezone);
   log("MCP:", config.mcpServerUrl);
 
-  // Proactive posting disabled. remote-ops-engine owns all scheduled alerts.
-  // The bot remains live for on-demand queries via Teams messages.
-  // startScheduler(app, mcp, config.timezone, config);
-  // startControlTowerScheduler(app, mcp, config.timezone, config);
-  console.log("[Bot] Proactive posting disabled. Use remote-ops-engine for scheduled alerts.");
+  startScheduler(app, mcp, config.timezone, config);
+  console.log("[Bot] Scheduler started. Reports and alerts active.");
 }).catch((err) => {
   log("Fatal:", err.message);
   process.exit(1);
